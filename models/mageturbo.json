@@ -1,0 +1,9 @@
+{"1":{"class_type":"LoadImage","inputs":{"image":"@IMAGE@"}},
+"2":{"class_type":"ImageScaleToTotalPixels","inputs":{"image":["1",0],"upscale_method":"nearest-exact","megapixels":1.0,"resolution_steps":16}},
+"3":{"class_type":"UNETLoader","inputs":{"unet_name":"mage_flow_edit_turbo_int8_convrot.safetensors","weight_dtype":"default"}},
+"4":{"class_type":"CLIPLoader","inputs":{"clip_name":"qwen3vl_4b_bf16.safetensors","type":"mage","device":"default"}},
+"5":{"class_type":"VAELoader","inputs":{"vae_name":"mage_flow_vae_bf16.safetensors"}},
+"6":{"class_type":"TextEncodeMageFlowEdit","inputs":{"clip":["4",0],"prompt":"@PROMPT@","negative_prompt":"","images.image_1":["2",0],"width":0,"height":0,"batch_size":1,"vae":["5",0]}},
+"7":{"class_type":"KSampler","inputs":{"model":["3",0],"positive":["6",0],"negative":["6",1],"latent_image":["6",2],"seed":"@SEED@","steps":4,"cfg":1.0,"sampler_name":"euler","scheduler":"simple","denoise":1.0}},
+"8":{"class_type":"VAEDecode","inputs":{"samples":["7",0],"vae":["5",0]}},
+"9":{"class_type":"SaveImage","inputs":{"images":["8",0],"filename_prefix":"@PREFIX@"}}}

@@ -1,0 +1,6 @@
+# this PC's folders, builds, everything voxup makes
+voxup.ini
+*.exe
+obj/
+out/
+*.log

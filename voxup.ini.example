@@ -1,0 +1,28 @@
+# voxup.ini: where things are. Copy this file to voxup.ini beside voxup.exe and fill in your folders.
+# Lines are "key = value"; # starts a comment. Only sprites is needed to open the window; comfy and model_files
+# to draw and to get models.
+
+# the original sprites, NNN.png (000.png, 001.png, ...), up to 32 x 32
+sprites = C:\path\to\sprites
+# optional: item names, lines "N: name" (or "N: a_name")
+names = C:\path\to\names.txt
+# optional, may repeat: item descriptions for the prompt, lines "N|what it is"
+desc = C:\path\to\descriptions.txt
+# optional: your own enlarged sprites: NNN.png (shown beside the original) and raw\NNN_in.raw (the picture the models
+# start from: width and height as 4-byte integers, then RGBA). Without it the original sprite itself is used.
+enlarged = C:\path\to\enlarged
+# ComfyUI: its folder (with .venv\Scripts\python.exe and main.py), and optionally an extra_model_paths.yaml
+comfy = C:\path\to\ComfyUI
+comfy_paths = C:\path\to\extra_model_paths.yaml
+# the models folder ComfyUI reads (diffusion_models, text_encoders, vae, loras ...): Get puts files here
+model_files = C:\path\to\ComfyUI\models
+port = 8189
+# where Keep writes NNN.png (may repeat, up to 4); the biggest picture the game takes
+game = C:\path\to\game\sprites
+game_max = 32
+# optional: where rounds, keeps and logs go (default out\pick beside the exe); the model list (default models\)
+# work = C:\path\to\voxup-work
+# models = C:\path\to\models
+# optional: how many item numbers there are (up to 512), and numbers left out of the list
+# items = 320
+# skip = 64-127, 15

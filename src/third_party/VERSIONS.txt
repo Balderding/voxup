@@ -1,0 +1,2 @@
+nuklear.h, nuklear_gdi.h: github.com/Immediate-Mode-UI/Nuklear commit bab18497df988c171fd0d82baad798e1e0e34259 (2026-11-05), public domain / MIT
+stb_image.h, stb_image_write.h: github.com/nothings/stb commit 73c888aef0bee92c5ff20f8e4ebf4df93119a4ea, public domain / MIT
