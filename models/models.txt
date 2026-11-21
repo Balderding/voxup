@@ -4,6 +4,13 @@
 #   note TEXT         shown when the mouse is over it
 #   prompt draw|edit  the standard prompt: "draw" (describe and draw anew; Klein's) or "edit" (an instruction; Kontext's)
 #   file FOLDER NAME BYTES URL   a file it needs, in ComfyUI-Shared\models\FOLDER; got from URL when missing
+#   prompt tags       Stable Diffusion's kind of prompt (short phrases)
+#   sd ctx KEY VALUE  the built-in engine (stable-diffusion.cpp): a loading option; "files:FOLDER/NAME" = that file
+#   sd img KEY VALUE  the built-in engine: an option for every picture (keys: stable-diffusion.cpp docs/guides/c_api.md)
+#   sd image ref|init the item's picture as a reference picture (ref, edit models) or as the start picture (init)
+#   sd strength N     init: how much may change, %, the window's standard (ComfyUI graphs: "@STRENGTH@")
+#   sd lora FOLDER NAME N   a LoRA at N %, the window's standard (ComfyUI graphs: "@LORA@")
+# A model with sd lines can be drawn inside voxup (Engine: Built-in); with a graph, by ComfyUI; with both, by either.
 # The graphs are ComfyUI API graphs taken from ComfyUI's own templates (comfyui_workflow_templates_json 0.1.74, ComfyUI
 # 0.35.1); in them "@IMAGE@", "@PROMPT@", "@SEED@" and "@PREFIX@" are filled in for every picture.
 # Left out on purpose: FLUX.2 Klein 9B base/distilled (Hugging Face login needed), FireRed 1.1 (41 GB), FLUX.2 dev
@@ -16,6 +23,13 @@ prompt draw
 file diffusion_models flux-2-klein-base-4b-fp8.safetensors 4089498488 https://huggingface.co/black-forest-labs/FLUX.2-klein-base-4b-fp8/resolve/main/flux-2-klein-base-4b-fp8.safetensors
 file text_encoders qwen_3_4b.safetensors 8044982048 https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors
 file vae flux2-vae.safetensors 336213556 https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors
+sd ctx diffusion_model_path files:diffusion_models/flux-2-klein-base-4b-fp8.safetensors
+sd ctx llm_path files:text_encoders/qwen_3_4b.safetensors
+sd ctx vae_path files:vae/flux2-vae.safetensors
+sd image ref
+sd img sample.steps 20
+sd img sample.method euler
+sd img sample.guidance.txt_cfg 5.0
 
 model kontext
 name Kontext
@@ -25,6 +39,15 @@ file diffusion_models flux1-dev-kontext_fp8_scaled.safetensors 11904640136 https
 file text_encoders clip_l.safetensors 246144152 https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors
 file text_encoders t5xxl_fp8_e4m3fn_scaled.safetensors 5157348688 https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn_scaled.safetensors
 file vae ae.safetensors 335304388 https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/vae/ae.safetensors
+sd ctx diffusion_model_path files:diffusion_models/flux1-dev-kontext_fp8_scaled.safetensors
+sd ctx clip_l_path files:text_encoders/clip_l.safetensors
+sd ctx t5xxl_path files:text_encoders/t5xxl_fp8_e4m3fn_scaled.safetensors
+sd ctx vae_path files:vae/ae.safetensors
+sd image ref
+sd img sample.steps 24
+sd img sample.method euler
+sd img sample.guidance.txt_cfg 1.0
+sd img sample.guidance.distilled_guidance 2.5
 
 model klein4f
 name Klein 4B fast
@@ -33,6 +56,13 @@ prompt draw
 file diffusion_models flux-2-klein-4b-fp8.safetensors 4070624520 https://huggingface.co/black-forest-labs/FLUX.2-klein-4b-fp8/resolve/main/flux-2-klein-4b-fp8.safetensors
 file text_encoders qwen_3_4b.safetensors 8044982048 https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors
 file vae flux2-vae.safetensors 336213556 https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors
+sd ctx diffusion_model_path files:diffusion_models/flux-2-klein-4b-fp8.safetensors
+sd ctx llm_path files:text_encoders/qwen_3_4b.safetensors
+sd ctx vae_path files:vae/flux2-vae.safetensors
+sd image ref
+sd img sample.steps 4
+sd img sample.method euler
+sd img sample.guidance.txt_cfg 1.0
 
 model klein9kv
 name Klein 9B fast
@@ -98,3 +128,20 @@ prompt edit
 file diffusion_models omnigen2_fp16.safetensors 7934384176 https://huggingface.co/Comfy-Org/Omnigen2_ComfyUI_repackaged/resolve/main/split_files/diffusion_models/omnigen2_fp16.safetensors
 file text_encoders qwen_2.5_vl_fp16.safetensors 7509337224 https://huggingface.co/Comfy-Org/Omnigen2_ComfyUI_repackaged/resolve/main/split_files/text_encoders/qwen_2.5_vl_fp16.safetensors
 file vae ae.safetensors 335304388 https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/vae/ae.safetensors
+
+model sdxlpix
+name SDXL pixel art
+note Stable Diffusion XL 1.0 with the Pixel Art XL LoRA: repaints the item's picture in pixel art. 30 steps.
+prompt tags
+file checkpoints sd_xl_base_1.0.safetensors 6938078334 https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors
+file vae sdxl_vae.safetensors 334641162 https://huggingface.co/madebyollin/sdxl-vae-fp16-fix/resolve/main/sdxl_vae.safetensors
+file loras pixel-art-xl.safetensors 170543052 https://huggingface.co/nerijs/pixel-art-xl/resolve/main/pixel-art-xl.safetensors
+sd ctx model_path files:checkpoints/sd_xl_base_1.0.safetensors
+sd ctx vae_path files:vae/sdxl_vae.safetensors
+sd image init
+sd strength 60
+sd lora loras pixel-art-xl.safetensors 100
+sd img sample.steps 30
+sd img sample.method euler_a
+sd img sample.guidance.txt_cfg 6.0
+sd img negative_prompt blurry, photo, realistic, 3d render, text, watermark, border, frame, shadow, several items, gradient background

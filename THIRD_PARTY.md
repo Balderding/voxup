@@ -8,6 +8,12 @@
 
 The commits used are in `src/third_party/VERSIONS.txt`.
 
+## Linked in when built with the built-in engine (`build.cmd sd`), not in this repository
+- **stable-diffusion.cpp**, github.com/leejet/stable-diffusion.cpp, MIT License, Copyright (c) 2023 leejet; with
+  **ggml**, github.com/ggml-org/ggml, MIT License, Copyright (c) 2023-2026 The ggml authors, and the libraries in its
+  `thirdparty` folder under their own licences. A voxup.exe built this way carries their licence texts along: they are
+  in that source tree (`LICENSE`, `ggml/LICENSE`, `thirdparty/`).
+
 ## Followed, not copied
 - **Pillow's resampling.** `src/pick.c` (`coeffs`, `resize_f`) and `src/shrink.c` (`coeffs`, `resize_k`) work out the
   filter weights the way Pillow's `Resample.c` does, so the results match Pillow's to the pixel. Pillow's notice:

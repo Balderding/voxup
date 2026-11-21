@@ -11,10 +11,14 @@ desc = C:\path\to\descriptions.txt
 # optional: your own enlarged sprites: NNN.png (shown beside the original) and raw\NNN_in.raw (the picture the models
 # start from: width and height as 4-byte integers, then RGBA). Without it the original sprite itself is used.
 enlarged = C:\path\to\enlarged
+# optional, may repeat (up to 4, the first with the file wins): the items stood upright, NNN.png at 32 x 32. Shown as
+# the third picture; "Draw from" can give it to the models (the sprite is then shrunk into its box)
+# upright = C:\path\to\upright
 # ComfyUI: its folder (with .venv\Scripts\python.exe and main.py), and optionally an extra_model_paths.yaml
 comfy = C:\path\to\ComfyUI
 comfy_paths = C:\path\to\extra_model_paths.yaml
-# the models folder ComfyUI reads (diffusion_models, text_encoders, vae, loras ...): Get puts files here
+# the models folder (diffusion_models, text_encoders, vae, checkpoints, loras ...): Get puts files here, ComfyUI
+# and the built-in engine read them from here
 model_files = C:\path\to\ComfyUI\models
 port = 8189
 # where Keep writes NNN.png (may repeat, up to 4); the biggest picture the game takes

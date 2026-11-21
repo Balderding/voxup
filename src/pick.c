@@ -34,6 +34,13 @@
 #include "third_party/stb_image_write.h"
 #include "vlog.h"
 #include "shrink.h"
+/* the built-in engine (stable-diffusion.cpp, built in with -DVOXUP_SD): models drawn inside voxup, no ComfyUI */
+#ifdef VOXUP_SD
+#include "stable-diffusion.h"
+#define SD_BUILT 1
+#else
+#define SD_BUILT 0
+#endif
 
 int voxup_cli(int argc, char **argv);
 HDC nk_gdi_memdc(void);
@@ -42,6 +49,7 @@ HBITMAP nk_gdi_membitmap(void);
 /* ---------------------------------------------------------------- where things are */
 /* every folder comes from voxup.ini beside the exe (voxup.ini.example says what each one is) */
 static char P_SPRITES[MAX_PATH], P_NAMES[MAX_PATH], P_DESC[4][MAX_PATH], P_ENLARGED[MAX_PATH], P_COMFY[MAX_PATH], P_YAML[MAX_PATH], P_SHARED[MAX_PATH];
+static char P_UPRIGHT[4][MAX_PATH]; static int N_UPRIGHT;     /* upright = folders of NNN.png, 32 x 32, the item stood upright */
 static char P_GAME[4][MAX_PATH]; static int N_DESC, N_GAME, PORT = 8189, ITEMS_MAX = 512, GAME_MAX = 32;
 static char SKIP[512];                      /* items left out of the list (voxup.ini skip = ...) */
 static const char *GAMEDIRS[4]; static char GAMETAG[4][16];
@@ -57,6 +65,10 @@ static const char *KONTEXT_T = "This is a rough picture of an item from a fantas
     "richly detailed hand-painted game item, laid out exactly as in the picture: the same pose, direction, size and "
     "proportions. Keep the picture's colours: every part keeps the colour it has there. Crisp and clean, alone on " BG
     ", no shadow on the ground, no text, no border.";
+/* "tags": Stable Diffusion's kind of prompt (short phrases), for models that repaint the item's picture */
+static const char *SD_T = "pixel art, game item icon, {d}, single item, centered, crisp clean pixels, bold dark outline, "
+    "flat solid bright magenta background, no text, no border";
+static const char *std_prompt(int kind) { return kind == 1 ? KONTEXT_T : kind == 2 ? SD_T : KLEIN_T; }
 
 /* ---------------------------------------------------------------- small helpers */
 static char WORK[MAX_PATH];                 /* out\pick beside the exe */
@@ -407,7 +419,9 @@ static void url_esc(char *o, int n, const char *s) {
 enum { ST_EMPTY, ST_WAIT, ST_DRAW, ST_DONE, ST_FAIL, ST_STOP };
 /* a shot: its sprite as the settings make it (res, rw x rh, made with settings generation gen), the drawing kept in memory
    while its round is shown (drw), the window's picture of it (bm, of generation bmgen) */
-typedef struct { int model; unsigned seed; volatile int st; unsigned char *res; int rw, rh; volatile LONG gen; HBITMAP bm; LONG bmgen;
+/* src: what the model was given, so the drawing is shrunk into that picture's box (FROM_UP: the upright one) */
+enum { FROM_TOOL, FROM_UP, FROM_ORIG };
+typedef struct { int model; unsigned seed; int src; volatile int st; unsigned char *res; int rw, rh; volatile LONG gen; HBITMAP bm; LONG bmgen;
                  unsigned char *drw; int dw, dh; char err[200]; } Shot;
 #define MAXSHOT 40
 typedef struct { int n; Shot s[MAXSHOT]; } Round;
@@ -416,9 +430,15 @@ typedef struct { int n; Shot s[MAXSHOT]; } Round;
 #define MAXM 24
 #define MAXF 6
 typedef struct { char dir[32], name[112], url[512]; long long size; } MFile;
+/* the built-in engine's lines of a model ("sd ctx KEY VALUE", "sd img KEY VALUE"): where 'c' context, 'i' each picture */
+#define MAXSD 24
+typedef struct { char where, key[64], val[600]; } SdLine;
 typedef struct {
     char id[24], name[40], note[240]; int edit; char *graph; MFile f[MAXF]; int nf;
     int n, ready; char prompt[4096];
+    /* the built-in engine: its lines; how the item's picture goes in (1 a reference picture, 2 the start picture, so
+       strength says how much may change); a LoRA (models.txt "sd lora DIR NAME") at lora_w % */
+    SdLine sd[MAXSD]; int nsd, sdimage, strength, has_lora, lora_w; char lora[MAX_PATH];
 } Model;
 static struct {
     int list[512], nlist, pos;                 /* the items with a 16 x 16 original, minus voxup.ini's skip list */
@@ -430,13 +450,19 @@ static struct {
     ShrinkOpt opt; volatile LONG optgen;        /* the shrink settings (shrink.h) and their generation */
     volatile LONG rs_busy, rs_abort; int tab;   /* the reshaping thread; the right panel: 0 chosen, 1 settings */              /* the models; the one whose prompt is shown */
     volatile LONG dl_busy, dl_stop; int dl_model; volatile LONGLONG dl_done, dl_total; char dl_msg[300];
-    unsigned char orig[16 * 16 * 4], tool[32 * 32 * 4];
-    HBITMAP bm_orig, bm_tool, pv_draw, pv_small, pv_orig; int pv_for, pv_w, pv_h; LONG pv_gen;
+    unsigned char orig[16 * 16 * 4], tool[32 * 32 * 4], up[32 * 32 * 4];
+    unsigned char upfit[16 * 16 * 4];           /* the upright picture's box at 16 x 16, in the original's colours */
+    int has_up, from, upfrom;                   /* an upright picture found; what the models are given (FROM_*) */
+    HBITMAP bm_orig, bm_tool, bm_up, pv_up, pv_draw, pv_small, pv_orig; int pv_for, pv_w, pv_h; LONG pv_gen;
     char keptinfo[200];
     volatile LONG busy, stop; int drawing_round;
     CRITICAL_SECTION cs; char status[600];
     HWND wnd; HANDLE comfy, job; int upitem; char upname[128];
+    int engine; char sdstep[40];                /* 0: models with sd lines drawn by the built-in engine, 1: all by ComfyUI */
 } S;
+/* drawn inside voxup: the built-in engine is in this voxup, the model has its lines, and the engine is chosen (or the
+   model has no ComfyUI graph) */
+static int use_sd(int m) { return SD_BUILT && S.m[m].nsd > 0 && (S.engine == 0 || !S.m[m].graph); }
 
 static void status(const char *fmt, ...) {
     va_list a; char b[600];
@@ -477,7 +503,17 @@ static void load_models(void) {
         } else if (!m) vlog(VLOG_WARN, "models", "%s: \"%s\" before the first model line", p, l);
         else if (!strcmp(k, "name")) snprintf(m->name, sizeof m->name, "%s", v);
         else if (!strcmp(k, "note")) snprintf(m->note, sizeof m->note, "%s", v);
-        else if (!strcmp(k, "prompt")) m->edit = !strcmp(v, "edit");
+        else if (!strcmp(k, "prompt")) m->edit = !strcmp(v, "edit") ? 1 : !strcmp(v, "tags") ? 2 : 0;
+        else if (!strcmp(k, "sd")) {       /* the built-in engine: "sd ctx|img KEY VALUE", "sd image ref|init", "sd strength N", "sd lora DIR NAME N" */
+            char w[16] = "", key[64] = "", a[112] = ""; int nn = 0;
+            sscanf(v, "%15s %63s %n", w, key, &nn);
+            if (!strcmp(w, "image")) m->sdimage = !strcmp(key, "init") ? 2 : 1;
+            else if (!strcmp(w, "strength")) m->strength = atoi(key);
+            else if (!strcmp(w, "lora") && sscanf(v, "%*s %63s %111s %d", key, a, &m->lora_w) == 3) { snprintf(m->lora, sizeof m->lora, "%s\\%s", key, a); m->has_lora = 1; }
+            else if ((!strcmp(w, "ctx") || !strcmp(w, "img")) && key[0] && nn && m->nsd < MAXSD) {
+                SdLine *s = &m->sd[m->nsd++]; s->where = w[0]; snprintf(s->key, sizeof s->key, "%s", key); snprintf(s->val, sizeof s->val, "%s", v + nn);
+            } else vlog(VLOG_WARN, "models", "%s: bad sd line for %s: %s", p, m->id, v);
+        }
         else if (!strcmp(k, "file")) {
             MFile f; memset(&f, 0, sizeof f);
             if (m->nf >= MAXF || sscanf(v, "%31s %111s %lld %511s", f.dir, f.name, &f.size, f.url) != 4) vlog(VLOG_WARN, "models", "%s: bad file line for %s: %s", p, m->id, v);
@@ -485,11 +521,13 @@ static void load_models(void) {
         } else vlog(VLOG_WARN, "models", "%s: unknown line: %s", p, l);
     }
     free(t);
-    { int i, j; for (i = j = 0; i < S.nm; i++) {      /* a model without its graph cannot draw: left out, and said */
+    { int i, j; for (i = j = 0; i < S.nm; i++) {      /* a model with neither a graph nor the built-in engine's lines cannot draw */
+        int sd = SD_BUILT && S.m[i].nsd > 0;
         snprintf(p, sizeof p, "%s\\%s.json", MODELS, S.m[i].id);
-        if (!(S.m[i].graph = read_all(p, NULL))) { vlog(VLOG_ERR, "models", "model %s left out: its graph %s is missing", S.m[i].id, p); continue; }
-        if (!strstr(S.m[i].graph, "\"@IMAGE@\"") || !strstr(S.m[i].graph, "\"@PROMPT@\"") || !strstr(S.m[i].graph, "\"@SEED@\"")) {
-            vlog(VLOG_ERR, "models", "model %s left out: %s lacks \"@IMAGE@\", \"@PROMPT@\" or \"@SEED@\"", S.m[i].id, p); free(S.m[i].graph); continue; }
+        if ((S.m[i].graph = read_all(p, NULL)) && (!strstr(S.m[i].graph, "\"@IMAGE@\"") || !strstr(S.m[i].graph, "\"@PROMPT@\"") || !strstr(S.m[i].graph, "\"@SEED@\""))) {
+            vlog(VLOG_ERR, "models", "%s lacks \"@IMAGE@\", \"@PROMPT@\" or \"@SEED@\": not used", p); free(S.m[i].graph); S.m[i].graph = NULL; }
+        if (!S.m[i].graph && !sd) { vlog(VLOG_ERR, "models", "model %s left out: no graph %s%s", S.m[i].id, p, SD_BUILT ? " and no sd lines" : " (and this voxup has no built-in engine)"); continue; }
+        if (!S.m[i].strength) S.m[i].strength = 60;
         S.m[j++] = S.m[i];
     } S.nm = j; }
     check_ready();
@@ -568,6 +606,8 @@ static void set_res(Shot *s, const unsigned char *px, int w, int h, LONG gen) {
     memcpy(s->res, px, (size_t)w * h * 4); s->rw = w; s->rh = h; s->gen = gen;
     LeaveCriticalSection(&S.cs);
 }
+/* the picture a drawing is shrunk to: its box sets the sprite's place, its colours the palette */
+static const unsigned char *fitpic(int src) { return src == FROM_UP && S.has_up ? S.upfit : S.orig; }
 static void reshape_one(int item, Shot *s, const ShrinkOpt *o, LONG gen) {
     static unsigned char out[128 * 128 * 4]; int W, H;
     if (!s->drw) {
@@ -575,7 +615,7 @@ static void reshape_one(int item, Shot *s, const ShrinkOpt *o, LONG gen) {
         if (!(s->drw = stbi_load(p, &s->dw, &s->dh, &n, 3))) { vlog(VLOG_WARN, "shrink", "no drawing %s", p); s->gen = gen; return; }
     }
     shrink_size(o, 16, 16, &W, &H);
-    if (shrink(s->drw, s->dw, s->dh, S.orig, 16, 16, o, out)) set_res(s, out, W, H, gen);
+    if (shrink(s->drw, s->dw, s->dh, fitpic(s->src), 16, 16, o, out)) set_res(s, out, W, H, gen);
     else s->gen = gen;
 }
 static DWORD WINAPI rs_worker(LPVOID arg) {
@@ -627,7 +667,42 @@ static void read_kept(int item) {
     S.keptinfo[0] = 0;
     if ((t = read_all(p, NULL))) { char *e = strpbrk(t, "\r\n"); if (e) *e = 0; snprintf(S.keptinfo, sizeof S.keptinfo, "Kept: %s", t); free(t); }
 }
-/* an item: its pictures, description, and the rounds made before (rounds.txt: "ROUND MODEL SEED") */
+/* the description for what the models are given: desc-upright.txt for the upright picture, desc.txt for the others */
+static void desc_path(int item, int from, char *p, int n) { itemdir(item, p, n); strcat(p, from == FROM_UP ? "\\desc-upright.txt" : "\\desc.txt"); }
+static void load_desc_text(int item) {
+    char p[MAX_PATH], *t;
+    desc_path(item, S.from, p, sizeof p);
+    if (!(t = read_all(p, NULL)) && S.from == FROM_UP) { desc_path(item, FROM_TOOL, p, sizeof p); t = read_all(p, NULL); }
+    if (t) { wrap(t, S.descbuf, sizeof S.descbuf, 34); free(t); }
+    else if (S.desc[item]) wrap(S.desc[item], S.descbuf, sizeof S.descbuf, 34);
+    else S.descbuf[0] = 0;
+}
+static const char *FROM_NAMES[] = { "tool", "upright", "original" };
+static void save_from(int item) {
+    char p[MAX_PATH]; itemdir(item, p, sizeof p); mkdirs(p); strcat(p, "\\from.txt");
+    write_all(p, FROM_NAMES[S.from], strlen(FROM_NAMES[S.from]));
+}
+/* the upright picture (the first upright = folder with NNN.png at 32 x 32), and its box at 16 x 16 filled with the
+   original's colours: the shrink takes only a box and a colour set from the picture it fits to */
+static void load_upright(int item) {
+    char p[MAX_PATH]; int i, w, h, x0, y0, x1, y1, x, y, nc = 0, k = 0; unsigned char *d, cols[256][3];
+    S.has_up = 0; memset(S.upfit, 0, sizeof S.upfit);
+    for (i = 0; i < N_UPRIGHT && !S.has_up; i++) {
+        snprintf(p, sizeof p, "%s\\%03d.png", P_UPRIGHT[i], item);
+        if (!exists(p) || !(d = load_rgba(p, &w, &h))) continue;
+        if (w == 32 && h == 32) { memcpy(S.up, d, sizeof S.up); S.has_up = 1; }
+        else vlog(VLOG_WARN, "pick", "%s is %d x %d, not 32 x 32: not used", p, w, h);
+        stbi_image_free(d);
+    }
+    if (!S.has_up || !bbox_a(S.up, 32, 32, 127, &x0, &y0, &x1, &y1)) { S.has_up = 0; return; }
+    for (i = 0; i < 256 && nc < 256; i++) if (S.orig[i * 4 + 3] >= 128) { cols[nc][0] = S.orig[i * 4]; cols[nc][1] = S.orig[i * 4 + 1]; cols[nc][2] = S.orig[i * 4 + 2]; nc++; }
+    if (!nc) for (i = 0; i < 1024 && nc < 256; i++) if (S.up[i * 4 + 3] >= 128) { cols[nc][0] = S.up[i * 4]; cols[nc][1] = S.up[i * 4 + 1]; cols[nc][2] = S.up[i * 4 + 2]; nc++; }
+    for (y = y0 / 2; y < (y1 + 1) / 2 && y < 16; y++) for (x = x0 / 2; x < (x1 + 1) / 2 && x < 16; x++) {
+        unsigned char *o = S.upfit + (y * 16 + x) * 4;
+        o[0] = cols[k % nc][0]; o[1] = cols[k % nc][1]; o[2] = cols[k % nc][2]; o[3] = 255; k++;
+    }
+}
+/* an item: its pictures, description, and the rounds made before (rounds.txt: "ROUND MODEL SEED [upright]") */
 static void choose(int pos) {
     char p[MAX_PATH], *t; int item, w, h;
     unsigned char *d;
@@ -636,24 +711,29 @@ static void choose(int pos) {
     if (pos >= S.nlist) pos = 0;
     S.pos = pos; item = S.item = S.list[pos];
     free_rounds();
-    if (S.bm_orig) DeleteObject(S.bm_orig); if (S.bm_tool) DeleteObject(S.bm_tool); if (S.pv_orig) DeleteObject(S.pv_orig);
-    S.bm_orig = S.bm_tool = S.pv_orig = NULL;
+    if (S.bm_orig) DeleteObject(S.bm_orig); if (S.bm_tool) DeleteObject(S.bm_tool); if (S.bm_up) DeleteObject(S.bm_up); if (S.pv_up) DeleteObject(S.pv_up); if (S.pv_orig) DeleteObject(S.pv_orig);
+    S.bm_orig = S.bm_tool = S.bm_up = S.pv_up = S.pv_orig = NULL;
+    memset(S.orig, 0, sizeof S.orig);
     snprintf(p, sizeof p, "%s\\%03d.png", P_SPRITES, item);
-    if ((d = load_rgba(p, &w, &h))) { if (w == 16 && h == 16) { memcpy(S.orig, d, sizeof S.orig); S.bm_orig = mkbmp(S.orig, 16, 16, 8, 0); S.pv_orig = mkbmp(S.orig, 16, 16, 12, 0); } stbi_image_free(d); }
+    if ((d = load_rgba(p, &w, &h))) { if (w == 16 && h == 16) { memcpy(S.orig, d, sizeof S.orig); S.bm_orig = mkbmp(S.orig, 16, 16, 6, 0); S.pv_orig = mkbmp(S.orig, 16, 16, 12, 0); } stbi_image_free(d); }
     snprintf(p, sizeof p, "%s\\%03d.png", P_ENLARGED, item);
-    if ((d = load_rgba(p, &w, &h))) { if (w == 32 && h == 32) { memcpy(S.tool, d, sizeof S.tool); S.bm_tool = mkbmp(S.tool, 32, 32, 4, 0); } stbi_image_free(d); }
-    itemdir(item, p, sizeof p); strcat(p, "\\desc.txt");
-    if ((t = read_all(p, NULL))) { wrap(t, S.descbuf, sizeof S.descbuf, 34); free(t); }
-    else if (S.desc[item]) wrap(S.desc[item], S.descbuf, sizeof S.descbuf, 34);
-    else S.descbuf[0] = 0;
+    if ((d = load_rgba(p, &w, &h))) { if (w == 32 && h == 32) { memcpy(S.tool, d, sizeof S.tool); S.bm_tool = mkbmp(S.tool, 32, 32, 3, 0); } stbi_image_free(d); }
+    load_upright(item);
+    if (S.has_up) { S.bm_up = mkbmp(S.up, 32, 32, 3, 0); S.pv_up = mkbmp(S.up, 32, 32, 6, 0); }
+    /* what the models are given: from.txt, else the upright picture when there is one, else our tool's */
+    S.from = S.has_up ? FROM_UP : FROM_TOOL;
+    itemdir(item, p, sizeof p); strcat(p, "\\from.txt");
+    if ((t = read_all(p, NULL))) { int f; for (f = 0; f < 3; f++) if (!strncmp(t, FROM_NAMES[f], strlen(FROM_NAMES[f]))) S.from = f; free(t); }
+    if (S.from == FROM_UP && !S.has_up) S.from = FROM_TOOL;
+    load_desc_text(item);
     itemdir(item, p, sizeof p); strcat(p, "\\rounds.txt");
     if ((t = read_all(p, NULL))) {
         char *l;
         for (l = strtok(t, "\r\n"); l; l = strtok(NULL, "\r\n")) {
-            int rd, mi; char m[24]; unsigned seed; Shot s; char sp[MAX_PATH];
-            if (sscanf(l, "%d %23s %u", &rd, m, &seed) != 3 || rd < 0 || rd >= MAXR) continue;
+            int rd, mi; char m[24], src[16] = ""; unsigned seed; Shot s; char sp[MAX_PATH];
+            if (sscanf(l, "%d %23s %u %15s", &rd, m, &seed, src) < 3 || rd < 0 || rd >= MAXR) continue;
             if ((mi = find_model(m)) < 0) { vlog(VLOG_WARN, "pick", "%03d: a picture of model \"%s\", which is not in models.txt: not shown", item, m); continue; }
-            memset(&s, 0, sizeof s); s.model = mi; s.seed = seed;
+            memset(&s, 0, sizeof s); s.model = mi; s.seed = seed; s.src = !strcmp(src, "upright") ? FROM_UP : FROM_TOOL;
             shotpath(item, &s, 1, sp, sizeof sp);
             if (!(d = load_rgba(sp, &w, &h))) continue;
             if (w == 32 && h == 32) {
@@ -713,22 +793,28 @@ wait:
     status("ComfyUI did not answer within 5 minutes: see %s\\comfy.log", WORK);
     return 0;
 }
-/* the item's picture for the models: our tool's 128 x 128 enlarged sprite, its box 70% of a 1024 magenta square */
-static int upload_input(int item) {
-    char p[MAX_PATH], hdr[200], bnd[40], nm[64]; size_t len; char *raw; int w, h, x0, y0, x1, y1, cw, ch, nw, nh, ox, oy, x, y;
-    unsigned char *pic; Buf png = { 0 }, body = { 0 }, res = { 0 }; double f; int code;
-    if (S.upitem == item && S.upname[0]) return 1;
-    snprintf(p, sizeof p, "%s\\raw\\%03d_in.raw", P_ENLARGED, item);
-    if (!P_ENLARGED[0] || !(raw = read_all(p, &len)) || len < 8) {
+/* the item's picture for the models, 1024 x 1024 RGB (the caller frees it): what Draw from says (our tool's 128 x 128
+   enlarged sprite, the upright picture, or the original), its box 70% of a magenta square; also written as NNN\in.png */
+static unsigned char *make_input(int item) {
+    char p[MAX_PATH]; size_t len; char *raw = NULL; int w, h, x0, y0, x1, y1, cw, ch, nw, nh, ox, oy, x, y;
+    unsigned char *pic; Buf png = { 0 }; double f;
+    if (S.from == FROM_UP && S.has_up) {
+        len = 8 + 32 * 32 * 4; raw = xmalloc(len); w = h = 32; memcpy(raw, &w, 4); memcpy(raw + 4, &h, 4); memcpy(raw + 8, S.up, 32 * 32 * 4);
+        snprintf(p, sizeof p, "the upright picture of %03d", item);
+    } else if (S.from == FROM_TOOL) {
+        snprintf(p, sizeof p, "%s\\raw\\%03d_in.raw", P_ENLARGED, item);
+        if (P_ENLARGED[0] && (raw = read_all(p, &len)) && len < 8) { free(raw); raw = NULL; }
+    }
+    if (!raw) {
         /* no enlarged picture (raw\NNN_in.raw: width, height as 4-byte ints, then RGBA): the original sprite itself */
         int ow, oh; unsigned char *o; char sp[MAX_PATH];
         snprintf(sp, sizeof sp, "%s\\%03d.png", P_SPRITES, item);
-        if (!(o = load_rgba(sp, &ow, &oh))) { status("No picture for %03d (%s)", item, sp); return 0; }
+        if (!(o = load_rgba(sp, &ow, &oh))) { status("No picture for %03d (%s)", item, sp); return NULL; }
         len = 8 + (size_t)ow * oh * 4; raw = xmalloc(len); memcpy(raw, &ow, 4); memcpy(raw + 4, &oh, 4); memcpy(raw + 8, o, (size_t)ow * oh * 4);
         stbi_image_free(o); snprintf(p, sizeof p, "%s", sp);
     }
     memcpy(&w, raw, 4); memcpy(&h, raw + 4, 4);
-    if (w <= 0 || h <= 0 || len < 8 + (size_t)w * h * 4 || !bbox_a((unsigned char *)raw + 8, w, h, 127, &x0, &y0, &x1, &y1)) { status("%s is not a picture", p); free(raw); return 0; }
+    if (w <= 0 || h <= 0 || len < 8 + (size_t)w * h * 4 || !bbox_a((unsigned char *)raw + 8, w, h, 127, &x0, &y0, &x1, &y1)) { status("%s is not a picture", p); free(raw); return NULL; }
     cw = x1 - x0; ch = y1 - y0; f = 716.0 / (cw > ch ? cw : ch);
     nw = (int)nearbyint(cw * f); nh = (int)nearbyint(ch * f); ox = (1024 - nw) / 2; oy = (1024 - nh) / 2;
     pic = xmalloc(1024 * 1024 * 3);
@@ -740,8 +826,17 @@ static int upload_input(int item) {
     }
     free(raw);
     stbi_write_png_to_func(png_cb, &png, 1024, 1024, 3, pic, 1024 * 3);
-    free(pic);
     itemdir(item, p, sizeof p); mkdirs(p); strcat(p, "\\in.png"); write_all(p, png.p, png.n);
+    free(png.p);
+    return pic;
+}
+/* the picture sent to ComfyUI once per item and Draw-from choice */
+static int upload_input(int item) {
+    char hdr[200], bnd[40], nm[64]; unsigned char *pic; Buf png = { 0 }, body = { 0 }, res = { 0 }; int code;
+    if (S.upitem == item && S.upfrom == S.from && S.upname[0]) return 1;
+    if (!(pic = make_input(item))) return 0;
+    stbi_write_png_to_func(png_cb, &png, 1024, 1024, 3, pic, 1024 * 3);
+    free(pic);
     snprintf(bnd, sizeof bnd, "voxupBoundary%08x", (unsigned)GetTickCount());
     snprintf(nm, sizeof nm, "voxup_%03d.png", item);
     buf_str(&body, "--"); buf_str(&body, bnd); buf_str(&body, "\r\nContent-Disposition: form-data; name=\"image\"; filename=\""); buf_str(&body, nm);
@@ -751,7 +846,7 @@ static int upload_input(int item) {
     { wchar_t wh[200]; MultiByteToWideChar(CP_UTF8, 0, hdr, -1, wh, 200); code = http(L"POST", "/upload/image", body.p, (DWORD)body.n, wh, &res, 60000); }
     free(png.p); free(body.p);
     if (code != 200 || !jstr((char *)res.p, "name", S.upname, sizeof S.upname)) { status("ComfyUI did not take the picture (HTTP %d)", code); free(res.p); return 0; }
-    free(res.p); S.upitem = item;
+    free(res.p); S.upitem = item; S.upfrom = S.from;
     return 1;
 }
 /* the model's graph (vox\models\ID.json) with its blanks filled: "@IMAGE@" the uploaded picture, "@PROMPT@" the prompt,
@@ -765,6 +860,9 @@ static void graph(Buf *g, int model, const char *image, const char *prompt, unsi
         else if (!strncmp(q, "\"@PROMPT@\"", 10)) { json_esc(g, prompt); p = q + 10; }
         else if (!strncmp(q, "\"@SEED@\"", 8)) { snprintf(t, sizeof t, "%u", seed); buf_str(g, t); p = q + 8; }
         else if (!strncmp(q, "\"@PREFIX@\"", 10)) { snprintf(t, sizeof t, "\"voxup_%s\"", S.m[model].id); buf_str(g, t); p = q + 10; }
+        /* the window's per-model settings, as numbers: how much may change (0..1), the LoRA's strength (0..2) */
+        else if (!strncmp(q, "\"@STRENGTH@\"", 12)) { snprintf(t, sizeof t, "%.2f", S.m[model].strength / 100.0); buf_str(g, t); p = q + 12; }
+        else if (!strncmp(q, "\"@LORA@\"", 8)) { snprintf(t, sizeof t, "%.2f", S.m[model].lora_w / 100.0); buf_str(g, t); p = q + 8; }
         else { buf_add(g, q, 2); p = q + 2; }
     }
     buf_str(g, p);
@@ -826,10 +924,11 @@ static void make_prompt(const char *tmpl, const char *desc, char *o, int n) {
     { int k = (int)strlen(p); if (k > n - 1 - i) k = n - 1 - i; memcpy(o + i, p, (size_t)k); i += k; }
     o[i] = 0;
 }
+static void finish_shot(int item, int round, Shot *s, const void *pngb, size_t pngn);
 /* one shot: the job sent, waited for, the picture fetched, made 32 x 32, saved */
 static void draw_one(int item, int round, Shot *s, const char *desc, const char *tmpl) {
-    char prompt[12000], pid[80], fn[260], sub[260], ty[32], q[1200], a[600], b[600], path[MAX_PATH], line[100];
-    Buf g = { 0 }, res = { 0 }; int code, t, dw, dh, n; unsigned char *d;
+    char prompt[12000], pid[80], fn[260], sub[260], ty[32], q[1200], a[600], b[600];
+    Buf g = { 0 }, res = { 0 }; int code, t;
     make_prompt(tmpl, desc, prompt, sizeof prompt);
     graph(&g, s->model, S.upname, prompt, s->seed);
     code = http(L"POST", "/prompt", g.p, (DWORD)g.n, L"Content-Type: application/json", &res, 30000);
@@ -860,16 +959,105 @@ static void draw_one(int item, int round, Shot *s, const char *desc, const char 
     url_esc(a, sizeof a, fn); url_esc(b, sizeof b, sub);
     snprintf(q, sizeof q, "/view?filename=%s&subfolder=%s&type=%s", a, b, ty);
     if (http(L"GET", q, NULL, 0, NULL, &res, 60000) != 200 || res.n < 8) { snprintf(s->err, sizeof s->err, "could not fetch %s", fn); free(res.p); s->st = ST_FAIL; return; }
-    shotpath(item, s, 0, path, sizeof path); write_all(path, res.p, res.n);
-    d = stbi_load_from_memory(res.p, (int)res.n, &dw, &dh, &n, 3); free(res.p);
+    finish_shot(item, round, s, res.p, res.n); free(res.p);
+}
+#if SD_BUILT
+/* ---------------------------------------------------------------- the built-in engine (stable-diffusion.cpp) */
+static sd_ctx_t *SDX; static int SDX_MODEL = -1;      /* the loaded model, kept between rounds; only the worker uses it */
+static volatile LONG SDX_DRAWING;
+static void sd_log(enum sd_log_level_t lv, const char *t, void *data) {
+    char b[600]; size_t n; (void)data;
+    if (lv < SD_LOG_WARN) return;
+    snprintf(b, sizeof b, "%s", t); n = strlen(b); while (n && (b[n - 1] == '\n' || b[n - 1] == '\r')) b[--n] = 0;
+    vlog(lv == SD_LOG_ERROR ? VLOG_ERR : VLOG_WARN, "engine", "%s", b);
+}
+static void sd_progress(int step, int steps, float t, void *data) {
+    (void)data; (void)t;
+    if (SDX_DRAWING && steps > 0) { EnterCriticalSection(&S.cs); snprintf(S.sdstep, sizeof S.sdstep, " - step %d of %d", step, steps); LeaveCriticalSection(&S.cs); if (S.wnd) PostMessageA(S.wnd, WM_APP, 0, 0); }
+}
+/* "files:DIR/NAME" or "files:DIR\NAME" = that file in the models folder (voxup.ini model_files) */
+static void sd_value(const char *v, char *o, size_t n) {
+    if (!strncmp(v, "files:", 6)) { char *c; snprintf(o, n, "%s\\%s", P_SHARED, v + 6); for (c = o; *c; c++) if (*c == '/') *c = '\\'; }
+    else snprintf(o, n, "%s", v);
+}
+/* one option by its written value: tried as a whole number, a number, true/false, then as text */
+static int sd_set(sd_opt_t *o, const char *key, const char *v) {
+    char *e; long long i = strtoll(v, &e, 10); double f;
+    if (*v && !*e && sd_opt_set_int(o, key, i) == SD_STATUS_OK) return 1;
+    f = strtod(v, &e); if (*v && !*e && sd_opt_set_float(o, key, f) == SD_STATUS_OK) return 1;
+    if ((!strcmp(v, "true") || !strcmp(v, "false")) && sd_opt_set_bool(o, key, v[0] == 't') == SD_STATUS_OK) return 1;
+    return sd_opt_set_string(o, key, v) == SD_STATUS_OK;
+}
+static void sd_unload(void) { if (SDX) { sd_ctx_free(SDX); SDX = NULL; SDX_MODEL = -1; vlog(VLOG_INFO, "engine", "model unloaded"); } }
+static int sd_load(int model) {
+    Model *M = &S.m[model]; sd_ctx_opt_t *o; int i; char v[MAX_PATH + 600]; sd_status_t st;
+    if (SDX && SDX_MODEL == model) return 1;
+    sd_unload();
+    if (!(o = sd_ctx_opt_create())) return 0;
+    for (i = 0; i < M->nsd; i++) if (M->sd[i].where == 'c') {
+        sd_value(M->sd[i].val, v, sizeof v);
+        if (!sd_set(o, M->sd[i].key, v)) { vlog(VLOG_ERR, "engine", "%s: %s = %s refused: %s", M->id, M->sd[i].key, v, sd_get_last_error()); sd_opt_free(o); return 0; }
+    }
+    status("Loading %s into the built-in engine...", M->name);
+    st = sd_ctx_create(o, &SDX); sd_opt_free(o);
+    if (st != SD_STATUS_OK || !SDX) { status("The built-in engine could not load %s: %s", M->name, sd_get_last_error()); vlog(VLOG_ERR, "engine", "%s: load failed (%d): %s", M->id, (int)st, sd_get_last_error()); SDX = NULL; return 0; }
+    SDX_MODEL = model; vlog(VLOG_INFO, "engine", "loaded %s (%s)", M->id, sd_get_model_version_name(SDX));
+    return 1;
+}
+/* one shot drawn inside voxup: pic is the item's 1024 x 1024 picture (make_input) */
+static void draw_one_sd(int item, int round, Shot *s, const char *desc, const char *tmpl, const unsigned char *pic) {
+    Model *M = &S.m[s->model]; char prompt[12000], v[MAX_PATH + 600]; sd_img_gen_opt_t *o = NULL; sd_result_t *r = NULL;
+    sd_tensor_t *in = NULL; const sd_tensor_t *im; int64_t shape[3] = { 3, 1024, 1024 }; sd_status_t st; int i, ok = 0;
+    if (!sd_load(s->model)) { snprintf(s->err, sizeof s->err, "the built-in engine could not load %s", M->name); s->st = ST_FAIL; return; }
+    make_prompt(tmpl, desc, prompt, sizeof prompt);
+    if (!(o = sd_img_gen_opt_create()) || !(in = sd_tensor_create(SD_TENSOR_U8, 3, shape, pic, 1024 * 1024 * 3))) goto fail;
+    if (sd_opt_set_string(o, "prompt", prompt) || sd_opt_set_int(o, "seed", (int64_t)s->seed) ||
+        sd_opt_set_int(o, "width", 1024) || sd_opt_set_int(o, "height", 1024)) goto fail;
+    if (M->sdimage == 2) { if (sd_opt_set_tensor(o, "init_image", in) || sd_opt_set_float(o, "strength", M->strength / 100.0)) goto fail; }
+    else { const sd_tensor_t *refs[1]; refs[0] = in; if (sd_opt_set_tensors(o, "ref_images", refs, 1)) goto fail; }
+    if (M->has_lora && M->lora_w > 0) {
+        sd_lora_t l; char lp[MAX_PATH]; memset(&l, 0, sizeof l); snprintf(lp, sizeof lp, "%s\\%s", P_SHARED, M->lora);
+        l.path = lp; l.multiplier = M->lora_w / 100.0f;
+        if (sd_opt_set_loras(o, "loras", &l, 1)) goto fail;
+    }
+    for (i = 0; i < M->nsd; i++) if (M->sd[i].where == 'i') {
+        sd_value(M->sd[i].val, v, sizeof v);
+        if (!sd_set(o, M->sd[i].key, v)) { vlog(VLOG_ERR, "engine", "%s: %s = %s refused: %s", M->id, M->sd[i].key, v, sd_get_last_error()); goto fail; }
+    }
+    InterlockedExchange(&SDX_DRAWING, 1);
+    st = sd_generate_image(SDX, o, &r);
+    InterlockedExchange(&SDX_DRAWING, 0);
+    EnterCriticalSection(&S.cs); S.sdstep[0] = 0; LeaveCriticalSection(&S.cs);
+    if (S.stop) { sd_cancel_generation(SDX, SD_CANCEL_RESET); s->st = ST_STOP; goto done; }
+    if (st != SD_STATUS_OK || !r || sd_result_get_image_count(r) < 1 || !(im = sd_result_get_image(r, 0))) goto fail;
+    {   /* the picture: U8 [C, W, H] */
+        int c = (int)sd_tensor_dim(im, 0), w = (int)sd_tensor_dim(im, 1), h = (int)sd_tensor_dim(im, 2); Buf png = { 0 };
+        if (sd_tensor_type(im) != SD_TENSOR_U8 || (c != 3 && c != 4) || w < 16 || h < 16) { snprintf(s->err, sizeof s->err, "the engine gave a %d x %d x %d picture", c, w, h); s->st = ST_FAIL; goto done; }
+        stbi_write_png_to_func(png_cb, &png, w, h, c, sd_tensor_data(im), w * c);
+        finish_shot(item, round, s, png.p, png.n); free(png.p); ok = 1;
+    }
+    goto done;
+fail:
+    snprintf(s->err, sizeof s->err, "built-in engine: %s", sd_get_last_error()[0] ? sd_get_last_error() : "the picture failed");
+    vlog(VLOG_ERR, "engine", "%s %u: %s", M->id, s->seed, s->err); s->st = ST_FAIL;
+done:
+    (void)ok;
+    if (r) sd_result_free(r); if (in) sd_tensor_free(in); if (o) sd_opt_free(o);
+}
+#endif
+/* a fetched or drawn picture (PNG bytes): saved, made 32 x 32 and to the settings, added to rounds.txt */
+static void finish_shot(int item, int round, Shot *s, const void *pngb, size_t pngn) {
+    char path[MAX_PATH], line[100]; int dw, dh, n; unsigned char *d;
+    shotpath(item, s, 0, path, sizeof path); write_all(path, pngb, pngn);
+    d = stbi_load_from_memory(pngb, (int)pngn, &dw, &dh, &n, 3);
     { static unsigned char std32[32 * 32 * 4];
-    if (!d || dw < 16 || dh < 16 || !to32(d, dw, dh, S.orig, 16, 16, std32, 1)) { snprintf(s->err, sizeof s->err, "nothing to cut out of the picture"); if (d) stbi_image_free(d); s->st = ST_FAIL; return; }
+    if (!d || dw < 16 || dh < 16 || !to32(d, dw, dh, fitpic(s->src), 16, 16, std32, 1)) { snprintf(s->err, sizeof s->err, "nothing to cut out of the picture"); if (d) stbi_image_free(d); s->st = ST_FAIL; return; }
     s->drw = d; s->dw = dw; s->dh = dh;
     { ShrinkOpt o; LONG gen; EnterCriticalSection(&S.cs); o = S.opt; gen = S.optgen; LeaveCriticalSection(&S.cs); set_res(s, std32, 32, 32, -1); reshape_one(item, s, &o, gen); }
     shotpath(item, s, 1, path, sizeof path);       /* the standard sprite, as before (rounds.txt's shots load from it) */
     if (!stbi_write_png(path, 32, 32, 4, std32, 32 * 4)) vlog(VLOG_ERR, "png", "could not write %s", path); }
     itemdir(item, path, sizeof path); strcat(path, "\\rounds.txt");
-    snprintf(line, sizeof line, "%d %s %u", round, S.m[s->model].id, s->seed); append_line(path, line);
+    snprintf(line, sizeof line, "%d %s %u%s", round, S.m[s->model].id, s->seed, s->src == FROM_UP ? " upright" : ""); append_line(path, line);
     s->st = ST_DONE;
 }
 static DWORD WINAPI worker(LPVOID arg) {
@@ -878,19 +1066,40 @@ static DWORD WINAPI worker(LPVOID arg) {
     (void)arg;
     unwrap(S.descbuf, desc, sizeof desc);
     for (i = 0; i < S.nm; i++) unwrap(S.m[i].prompt, tm[i], sizeof tm[i]);     /* the prompts as they were at Draw */
-    if (!comfy_ready() || !upload_input(item)) {
-        for (i = 0; i < R->n; i++) if (R->s[i].st == ST_WAIT) R->s[i].st = S.stop ? ST_STOP : ST_FAIL;
-        goto out;
-    }
-    for (i = 0; i < R->n; i++) {
-        Shot *s = &R->s[i];
-        if (S.stop) { if (s->st == ST_WAIT) s->st = ST_STOP; continue; }
-        if (s->st != ST_WAIT) continue;
-        s->st = ST_DRAW;
-        status("Drawing %d of %d: %s seed %u%s", i + 1, R->n, S.m[s->model].name, s->seed, i == 0 || (i > 0 && R->s[i - 1].model != s->model) ? " (loading the model first)" : "");
-        draw_one(item, rd, s, desc, tm[s->model]);
-        if (s->st == ST_DONE) done++;
-        PostMessageA(S.wnd, WM_APP, 0, 0);
+    {   /* ComfyUI only when a shot needs it; the item's picture once for the built-in engine */
+        int need_comfy = 0, need_sd = 0; unsigned char *pic = NULL;
+        for (i = 0; i < R->n; i++) { if (use_sd(R->s[i].model)) need_sd = 1; else need_comfy = 1; }
+        if (need_comfy && (!comfy_ready() || !upload_input(item))) {
+            for (i = 0; i < R->n; i++) if (R->s[i].st == ST_WAIT && !use_sd(R->s[i].model)) R->s[i].st = S.stop ? ST_STOP : ST_FAIL;
+            need_comfy = 0;
+        }
+        if (need_sd && !(pic = make_input(item))) {
+            for (i = 0; i < R->n; i++) if (R->s[i].st == ST_WAIT) R->s[i].st = ST_FAIL;
+            goto out;
+        }
+#if SD_BUILT
+        /* the graphics card's memory for whichever draws: ComfyUI (ours, still running) asked to let go of its models,
+           or the built-in engine's model unloaded */
+        if (need_sd && S.comfy && WaitForSingleObject(S.comfy, 0) == WAIT_TIMEOUT && comfy_alive())
+            http(L"POST", "/free", "{\"unload_models\":true,\"free_memory\":true}", 41, L"Content-Type: application/json", NULL, 30000);
+#endif
+        for (i = 0; i < R->n; i++) {
+            Shot *s = &R->s[i]; int sd = use_sd(s->model);
+            if (S.stop) { if (s->st == ST_WAIT) s->st = ST_STOP; continue; }
+            if (s->st != ST_WAIT) continue;
+            s->st = ST_DRAW;
+            status("Drawing %d of %d: %s seed %u%s%s", i + 1, R->n, S.m[s->model].name, s->seed, sd ? " (built-in)" : "",
+                   i == 0 || (i > 0 && R->s[i - 1].model != s->model) ? " (loading the model first)" : "");
+#if SD_BUILT
+            if (sd) draw_one_sd(item, rd, s, desc, tm[s->model], pic);
+            else { sd_unload(); draw_one(item, rd, s, desc, tm[s->model]); }
+#else
+            draw_one(item, rd, s, desc, tm[s->model]);
+#endif
+            if (s->st == ST_DONE) done++;
+            PostMessageA(S.wnd, WM_APP, 0, 0);
+        }
+        free(pic);
     }
 out:
     if (!S.stop) status("Round %d done: %d of %d drawn in %lu s. Click one, then Keep, or press New seeds for more.",
@@ -905,10 +1114,10 @@ static unsigned rnd(void) { unsigned v = 0; rand_s(&v); return (v & 0x7fffffff) 
 static unsigned test_seeds[64]; static int ntest_seeds, test_seed_i;      /* self-test --seeds: these first, in order */
 static void save_text(int item) {
     char p[MAX_PATH], d[4096];
-    itemdir(item, p, sizeof p); mkdirs(p); strcat(p, "\\desc.txt");
+    itemdir(item, p, sizeof p); mkdirs(p); desc_path(item, S.from, p, sizeof p);
     unwrap(S.descbuf, d, sizeof d); write_all(p, d, strlen(d));
     { int m; for (m = 0; m < S.nm; m++) {         /* a model's prompt file: written once it differs from the standard one */
-        char std[4096], w[4096]; const char *st = S.m[m].edit ? KONTEXT_T : KLEIN_T;
+        char std[4096], w[4096]; const char *st = std_prompt(S.m[m].edit);
         snprintf(p, sizeof p, "%s\\%s-prompt.txt", WORK, S.m[m].id);
         wrap(st, w, sizeof w, 34); unwrap(w, std, sizeof std); unwrap(S.m[m].prompt, d, sizeof d);
         if (exists(p) || strcmp(d, std)) write_all(p, d, strlen(d));
@@ -925,7 +1134,7 @@ static void start_round(void) {
     R = &S.r[S.nr]; memset(R, 0, sizeof *R);
     for (m = 0; m < S.nm; m++) for (i = 0; S.m[m].ready && i < S.m[m].n; i++) {
         unsigned s; if (test_seed_i < ntest_seeds) s = test_seeds[test_seed_i++]; else do s = rnd(); while (seed_used(s));
-        R->s[R->n].model = m; R->s[R->n].seed = s; R->s[R->n].st = ST_WAIT;
+        R->s[R->n].model = m; R->s[R->n].seed = s; R->s[R->n].st = ST_WAIT; R->s[R->n].src = S.from == FROM_UP && S.has_up ? FROM_UP : S.from;
         R->n++;
     }
     S.drawing_round = S.nr; S.cur = S.nr; S.nr++; S.sel = -1;
@@ -1171,7 +1380,7 @@ static void settings_panel(struct nk_context *ctx) {
     nk_layout_row_dynamic(ctx, 60, 1); nk_label_colored_wrap(ctx, d, DIM);
 }
 static int gui_frame(struct nk_context *ctx, int W, int H) {
-    char lab[200]; int i, busy = S.busy != 0;
+    char lab[700]; int i, busy = S.busy != 0;
     if (!nk_begin(ctx, "voxup", nk_rect(0, 0, (float)W, (float)H), NK_WINDOW_NO_SCROLLBAR)) { nk_end(ctx); return 0; }
     nk_layout_row_begin(ctx, NK_STATIC, (float)(H - 16), 3);
     /* left: the item */
@@ -1192,10 +1401,27 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
         } else if (busy) { nk_widget_disable_begin(ctx); nk_button_label(ctx, lab); nk_widget_disable_end(ctx); }
         nk_layout_row_push(ctx, 30); if (button(ctx, ">", 0, !busy)) choose(S.pos + 1);
         nk_layout_row_end(ctx);
-        nk_layout_row_static(ctx, 18, 140, 2); nk_label_colored(ctx, "Original 16 x 16", NK_TEXT_LEFT, DIM); nk_label_colored(ctx, "Our tool 32 x 32", NK_TEXT_LEFT, DIM);
-        nk_layout_row_static(ctx, 128, 128, 2);
-        if (S.bm_orig) nk_image(ctx, nkimg(S.bm_orig, 128, 128)); else nk_label(ctx, "(none)", NK_TEXT_LEFT);
-        if (S.bm_tool) nk_image(ctx, nkimg(S.bm_tool, 128, 128)); else nk_label(ctx, "(none)", NK_TEXT_LEFT);
+        /* the three before pictures: the original, our tool's enlarged one, the upright one (voxup.ini upright =) */
+        nk_layout_row_static(ctx, 18, 100, 3); nk_label_colored(ctx, "Original 16", NK_TEXT_LEFT, DIM); nk_label_colored(ctx, "Our tool 32", NK_TEXT_LEFT, DIM); nk_label_colored(ctx, "Upright 32", NK_TEXT_LEFT, DIM);
+        nk_layout_row_static(ctx, 96, 96, 3);
+        if (S.bm_orig) nk_image(ctx, nkimg(S.bm_orig, 96, 96)); else nk_label(ctx, "(none)", NK_TEXT_LEFT);
+        if (S.bm_tool) nk_image(ctx, nkimg(S.bm_tool, 96, 96)); else nk_label(ctx, "(none)", NK_TEXT_LEFT);
+        if (S.bm_up) nk_image(ctx, nkimg(S.bm_up, 96, 96)); else nk_label_colored(ctx, "(none)", NK_TEXT_LEFT, DIM);
+        {   /* what the models are given */
+            static const char *fl[] = { "Our tool's", "The upright one", "The original" }; int f = S.from, nf;
+            nk_layout_row_begin(ctx, NK_STATIC, 24, 2); nk_layout_row_push(ctx, 120); nk_label(ctx, "Draw from", NK_TEXT_LEFT);
+            nk_layout_row_push(ctx, 180);
+            if (busy) nk_widget_disable_begin(ctx);
+            nf = nk_combo(ctx, fl, 3, f, 22, nk_vec2(180, 100));
+            if (busy) nk_widget_disable_end(ctx);
+            nk_layout_row_end(ctx);
+            if (!busy && nf != f && (nf != FROM_UP || S.has_up)) {
+                char d[4096]; unwrap(S.descbuf, d, sizeof d);
+                if (d[0]) { char p[MAX_PATH]; itemdir(S.item, p, sizeof p); mkdirs(p); desc_path(S.item, S.from, p, sizeof p); write_all(p, d, strlen(d)); }
+                S.from = nf; save_from(S.item); load_desc_text(S.item);
+                status(nf == FROM_UP ? "%03d: the models get the upright picture; describe it standing upright." : "%03d: the models get %s picture.", S.item, nf == FROM_TOOL ? "our tool's" : "the original");
+            }
+        }
         nk_layout_row_dynamic(ctx, 20, 1);
         if (S.keptinfo[0]) nk_label_colored(ctx, S.keptinfo, NK_TEXT_LEFT, TEAL2); else nk_label_colored(ctx, "Not kept yet", NK_TEXT_LEFT, DIM);
         nk_label_colored(ctx, "What it is (goes into the prompt)", NK_TEXT_LEFT, GOLD);
@@ -1203,6 +1429,18 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
         nk_edit_string_zero_terminated(ctx, NK_EDIT_BOX, S.descbuf, sizeof S.descbuf, nk_filter_default);
         /* 2026-11-21: the models (models.txt): how many pictures each draws; Only = this one alone; Get = download it */
         nk_layout_row_dynamic(ctx, 20, 1); nk_label_colored(ctx, "Models: how many pictures each", NK_TEXT_LEFT, GOLD);
+#if SD_BUILT
+        {   /* which engine draws the models that both can draw */
+            static const char *el[] = { "Built-in", "ComfyUI" }; struct nk_rect bb;
+            nk_layout_row_begin(ctx, NK_STATIC, 24, 2); nk_layout_row_push(ctx, 120); bb = nk_widget_bounds(ctx); nk_label(ctx, "Engine", NK_TEXT_LEFT);
+            if (nk_input_is_mouse_hovering_rect(&ctx->input, bb)) nk_tooltip(ctx, "Built-in: drawn inside voxup, no ComfyUI. ComfyUI: started hidden. A model only one can draw uses that one.");
+            nk_layout_row_push(ctx, 180);
+            if (busy) nk_widget_disable_begin(ctx);
+            S.engine = nk_combo(ctx, el, 2, S.engine, 22, nk_vec2(180, 80));
+            if (busy) nk_widget_disable_end(ctx);
+            nk_layout_row_end(ctx);
+        }
+#endif
         for (i = 0; i < S.nm; i++) {
             Model *M = &S.m[i]; struct nk_rect bb; int dl = S.dl_busy && S.dl_model == i;
             nk_layout_row_begin(ctx, NK_STATIC, 24, 3);
@@ -1226,9 +1464,14 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
         snprintf(lab, sizeof lab, S.nr ? "New %d seeds" : "Draw %d", round_size());
         if (button(ctx, lab, 1, !busy && round_size() > 0 && round_size() <= MAXSHOT)) start_round();
         nk_layout_row_dynamic(ctx, 28, 1);
-        if (button(ctx, S.stop && busy ? "Stopping..." : "Stop", 0, busy && !S.stop)) { InterlockedExchange(&S.stop, 1); status("Stopping after this picture..."); }
+        if (button(ctx, S.stop && busy ? "Stopping..." : "Stop", 0, busy && !S.stop)) {
+            InterlockedExchange(&S.stop, 1); status("Stopping after this picture...");
+#if SD_BUILT
+            if (SDX_DRAWING && SDX) sd_cancel_generation(SDX, SD_CANCEL_ALL);     /* the built-in engine stops at once */
+#endif
+        }
         nk_layout_row_dynamic(ctx, 60, 1);
-        EnterCriticalSection(&S.cs); strcpy(lab, ""); nk_label_colored_wrap(ctx, S.status, GOLD); LeaveCriticalSection(&S.cs);
+        EnterCriticalSection(&S.cs); snprintf(lab, sizeof lab, "%.400s%s", S.status, S.sdstep); LeaveCriticalSection(&S.cs); nk_label_colored_wrap(ctx, lab, GOLD);
         if (nk_tree_push(ctx, NK_TREE_TAB, "Prompts ({d} = what it is)", NK_MINIMIZED)) {
             if (S.nm) {
                 Model *M = &S.m[S.pmodel < S.nm ? S.pmodel : 0];
@@ -1240,7 +1483,10 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
                 }
                 nk_layout_row_dynamic(ctx, 200, 1); nk_edit_string_zero_terminated(ctx, NK_EDIT_BOX, M->prompt, sizeof M->prompt, nk_filter_default);
                 nk_layout_row_dynamic(ctx, 26, 1);
-                if (button(ctx, "Back to its standard prompt", 0, !busy)) wrap(M->edit ? KONTEXT_T : KLEIN_T, M->prompt, sizeof M->prompt, 34);
+                if (button(ctx, "Back to its standard prompt", 0, !busy)) wrap(std_prompt(M->edit), M->prompt, sizeof M->prompt, 34);
+                /* a model that repaints the item's picture: how much it may change; its LoRA's strength (0 = none) */
+                if (M->sdimage == 2) { nk_layout_row_dynamic(ctx, 24, 1); nk_property_int(ctx, "#How much may change %:", 5, &M->strength, 100, 5, 1); }
+                if (M->has_lora) { nk_layout_row_dynamic(ctx, 24, 1); nk_property_int(ctx, "#Its LoRA %:", 0, &M->lora_w, 200, 5, 1); }
             }
             nk_tree_pop(ctx);
         }
@@ -1312,8 +1558,11 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
             snprintf(lab, sizeof lab, "%s seed %u", S.m[s->model].name, s->seed); nk_label_colored(ctx, lab, NK_TEXT_LEFT, GOLD);
             snprintf(lab, sizeof lab, "As it will be in the game (%d x %d)", s->rw, s->rh); nk_label_colored(ctx, lab, NK_TEXT_LEFT, DIM);
             nk_layout_row_static(ctx, (float)(S.pv_h ? S.pv_h : 192), S.pv_w ? S.pv_w : 192, 1); if (S.pv_small) nk_image(ctx, nkimg(S.pv_small, S.pv_w, S.pv_h)); else nk_spacing(ctx, 1);
-            nk_layout_row_dynamic(ctx, 20, 1); nk_label_colored(ctx, "The original", NK_TEXT_LEFT, DIM);
-            nk_layout_row_static(ctx, 192, 192, 1); if (S.pv_orig) nk_image(ctx, nkimg(S.pv_orig, 192, 192));
+            {   /* what the model was given: the original, or the upright picture */
+                int up = s->src == FROM_UP && S.pv_up;
+                nk_layout_row_dynamic(ctx, 20, 1); nk_label_colored(ctx, up ? "The upright picture it was given" : "The original", NK_TEXT_LEFT, DIM);
+                nk_layout_row_static(ctx, 192, 192, 1); if (up) nk_image(ctx, nkimg(S.pv_up, 192, 192)); else if (S.pv_orig) nk_image(ctx, nkimg(S.pv_orig, 192, 192));
+            }
             nk_layout_row_dynamic(ctx, 20, 1); nk_label_colored(ctx, "The model's drawing", NK_TEXT_LEFT, DIM);
             nk_layout_row_static(ctx, 192, 192, 1); if (S.pv_draw) nk_image(ctx, nkimg(S.pv_draw, 192, 192));
             nk_layout_row_dynamic(ctx, 40, 1);
@@ -1356,6 +1605,9 @@ static void settings(int save) {
         snprintf(l, sizeof l, "item=%d\r\n", S.item); buf_str(&b, l);
         for (i = 0; SHRINK_KEYS[i]; i++) { int v; shrink_get(&S.opt, SHRINK_KEYS[i], &v); snprintf(l, sizeof l, "shrink.%s=%d\r\n", SHRINK_KEYS[i], v); buf_str(&b, l); }
         for (m = 0; m < S.nm; m++) { snprintf(l, sizeof l, "n.%s=%d\r\n", S.m[m].id, S.m[m].n); buf_str(&b, l); }
+        for (m = 0; m < S.nm; m++) if (S.m[m].sdimage == 2) { snprintf(l, sizeof l, "strength.%s=%d\r\n", S.m[m].id, S.m[m].strength); buf_str(&b, l); }
+        for (m = 0; m < S.nm; m++) if (S.m[m].has_lora) { snprintf(l, sizeof l, "lora.%s=%d\r\n", S.m[m].id, S.m[m].lora_w); buf_str(&b, l); }
+        snprintf(l, sizeof l, "engine=%d\r\n", S.engine); buf_str(&b, l);
         write_all(p, b.p, b.n); free(b.p); return;
     }
     for (m = 0; m < S.nm; m++) S.m[m].n = !strcmp(S.m[m].id, "klein") || !strcmp(S.m[m].id, "kontext") ? 10 : 0;
@@ -1367,9 +1619,12 @@ static void settings(int save) {
         else if (!strcmp(S.m[m].id, "klein") && (q = strstr(t, "\nklein="))) S.m[m].n = atoi(q + 7);       /* 2026-11-20's pick.ini */
         else if (!strcmp(S.m[m].id, "kontext") && (q = strstr(t, "\nkontext="))) S.m[m].n = atoi(q + 9);
         if (S.m[m].n < 0 || S.m[m].n > 20) S.m[m].n = 0;
+        snprintf(k, sizeof k, "\nstrength.%s=", S.m[m].id); if ((q = strstr(t, k)) && atoi(q + strlen(k)) >= 5 && atoi(q + strlen(k)) <= 100) S.m[m].strength = atoi(q + strlen(k));
+        snprintf(k, sizeof k, "\nlora.%s=", S.m[m].id); if ((q = strstr(t, k)) && atoi(q + strlen(k)) >= 0 && atoi(q + strlen(k)) <= 200) S.m[m].lora_w = atoi(q + strlen(k));
         any += S.m[m].ready ? S.m[m].n : 0;
     }
     if (!any) for (m = 0; m < S.nm; m++) if (S.m[m].ready) { S.m[m].n = 10; if (++any == 2) break; }
+    if ((q = strstr(t, "\nengine="))) S.engine = atoi(q + 8) == 1;
     if ((q = strstr(t, "\nown="))) S.opt.colours = atoi(q + 5) == 1 ? C_OWN : C_ORIGINAL;      /* 2026-11-21 morning's pick.ini */
     for (i = 0; SHRINK_KEYS[i]; i++) { char k[48]; snprintf(k, sizeof k, "\nshrink.%s=", SHRINK_KEYS[i]); if ((q = strstr(t, k))) shrink_set(&S.opt, SHRINK_KEYS[i], atoi(q + strlen(k))); }
     free(t);
@@ -1377,6 +1632,7 @@ static void settings(int save) {
 
 static int gui(int argc, char **argv) {
     const char *shot = NULL, *test_get = NULL; char *draws[2 * MAXM]; int ndraw = 0, drawn = 0; char *sets[64]; int nsets = 0;
+    const char *test_from = NULL;
     int test_keep = 0, test_item = -1, i, k, W = 1440, H = 940, running = 1, refresh = 1, frames = 0;
     WNDCLASSW wc; RECT rc; DWORD style = WS_OVERLAPPEDWINDOW; HDC dc; GdiFont *font; struct nk_context *ctx; char p[MAX_PATH], *t;
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION jl;
@@ -1387,7 +1643,8 @@ static int gui(int argc, char **argv) {
             else if (!strcmp(argv[i], "--get") && i + 1 < argc) test_get = argv[++i];   /* Get pressed for that model first */
             else if (!strcmp(argv[i], "--set") && i + 1 < argc && nsets < 64) sets[nsets++] = argv[++i];   /* a shrink setting, key=value */
             else if (!strcmp(argv[i], "--tab") && i + 1 < argc) S.tab = atoi(argv[++i]);                   /* 1: the settings tab shown */
-            else if (!strcmp(argv[i], "--keep")) test_keep = 1;      /* Keep pressed too, into out\pick\selftest-game, never the game */
+            else if (!strcmp(argv[i], "--from") && i + 1 < argc) test_from = argv[++i];               /* tool, upright or original */
+            else if (!strcmp(argv[i], "--keep")) test_keep = 1;     /* Keep pressed too, into out\pick\selftest-game, never the game */
             else if (!strcmp(argv[i], "--seeds") && i + 1 < argc) {  /* "A,B,C": the round's seeds, to redraw a known picture */
                 char *s = argv[++i]; while (*s && ntest_seeds < 64) { test_seeds[ntest_seeds++] = (unsigned)strtoul(s, &s, 10); if (*s == ',') s++; else break; } }
             else test_item = atoi(argv[i]);
@@ -1413,7 +1670,7 @@ static int gui(int argc, char **argv) {
     for (i = 0; i < S.nm; i++) {     /* each model's prompt: out\pick\ID-prompt.txt when changed, else its standard one */
         snprintf(p, sizeof p, "%s\\%s-prompt.txt", WORK, S.m[i].id);
         if ((t = read_all(p, NULL))) { wrap(t, S.m[i].prompt, sizeof S.m[i].prompt, 34); free(t); }
-        else wrap(S.m[i].edit ? KONTEXT_T : KLEIN_T, S.m[i].prompt, sizeof S.m[i].prompt, 34);
+        else wrap(std_prompt(S.m[i].edit), S.m[i].prompt, sizeof S.m[i].prompt, 34);
     }
     shrink_defaults(&S.opt);
     settings(0);
@@ -1444,6 +1701,7 @@ static int gui(int argc, char **argv) {
     font = nk_gdifont_create("Segoe UI", 16);
     ctx = nk_gdi_init(font, dc, (unsigned)W, (unsigned)H);
     choose(S.pos);
+    if (test_from) { int f; for (f = 0; f < 3; f++) if (!strcmp(test_from, FROM_NAMES[f]) && (f != FROM_UP || S.has_up)) { S.from = f; load_desc_text(S.item); } }
     if (shot && test_get) { if ((k = find_model(test_get)) < 0) vlog(VLOG_ERR, "selftest", "--get: no model \"%s\"", test_get); else start_get(k); }
     vlog(VLOG_INFO, "pick", "window open%s, %d items, %d models", shot ? " (self-test, off screen)" : "", S.nlist, S.nm);
     while (running) {
@@ -1508,6 +1766,7 @@ static void read_ini(const char *exe, int selftest) {
         else if (!strcmp(k, "names")) snprintf(P_NAMES, MAX_PATH, "%s", v);
         else if (!strcmp(k, "desc") && N_DESC < 4) snprintf(P_DESC[N_DESC++], MAX_PATH, "%s", v);
         else if (!strcmp(k, "enlarged")) snprintf(P_ENLARGED, MAX_PATH, "%s", v);
+        else if (!strcmp(k, "upright") && N_UPRIGHT < 4) snprintf(P_UPRIGHT[N_UPRIGHT++], MAX_PATH, "%s", v);
         else if (!strcmp(k, "comfy")) snprintf(P_COMFY, MAX_PATH, "%s", v);
         else if (!strcmp(k, "comfy_paths")) snprintf(P_YAML, MAX_PATH, "%s", v);
         else if (!strcmp(k, "model_files")) snprintf(P_SHARED, MAX_PATH, "%s", v);
