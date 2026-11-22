@@ -2017,7 +2017,7 @@ static void compare_panel(struct nk_context *ctx, Shot *s) {
 /* the lines between the panels (2026-11-22): drag one to make the panels beside it wider or narrower, double-click it
    for its standard place; the widths are kept in pick.ini (split=) and the grid takes what is left */
 static void settings(int save);
-enum { SPLIT_W = 8, LEFT_MIN = 270, RIGHT_MIN = 290, GRID_MIN = 160, LEFT_DEF = 330, RIGHT_DEF = 330, WIN_MIN_W = 900, WIN_MIN_H = 600 };
+enum { SPLIT_W = 8, LEFT_MIN = 290, RIGHT_MIN = 290, GRID_MIN = 160, LEFT_DEF = 330, RIGHT_DEF = 330, WIN_MIN_W = 900, WIN_MIN_H = 600 };
 static void split_fit(int avail, int *gw) {     /* the wanted widths fitted into the window: the sides give way, never below their least */
     int l = S.want[0] < LEFT_MIN ? LEFT_MIN : S.want[0], r = S.want[1] < RIGHT_MIN ? RIGHT_MIN : S.want[1], room = avail - GRID_MIN;
     if (l + r > room) {
