@@ -27,6 +27,8 @@
 #include <math.h>
 #include <stdio.h>
 #include "shrink.h"
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>     /* one lock for what the shrinks share (review 3, P3-3) */
 #include "vlog.h"
 
 const char *const METHOD_NAMES[M_COUNT] = { "Lanczos", "Nearest", "Box (area)", "Bilinear", "Bicubic", "Mitchell", "Gaussian",
@@ -337,9 +339,23 @@ static void m_cells(float *const pl[4], int cw, int ch, int w, int h, int method
    each column (across each row), and the step and offset whose lines fall on the most change win. Each cell then takes
    its commonest colour, from its middle only (the soft seams left out), and the clean cells vote into the sprite's
    pixels as Majority does. No grid clear enough (its lines less than 1.6 times the average change): Majority. */
-static double G_CX, G_CY, G_SCORE, GRID_LAST_SCORE; static int G_STARS;
-void shrink_grid_info(double *cx, double *cy, int *st) { if (cx) *cx = G_CX; if (cy) *cy = G_CY; if (st) *st = G_STARS; }
-static double grid_find(const double *prof, int n, double s_max, double *best_off) {   /* returns the step (0: none), *best_off */
+/* the shrinks run on three threads (the reshaper, the drawing, the window): what they share, the palette and the last
+   grid found, goes through this lock, copied whole (review 3, P3-3) */
+static CRITICAL_SECTION SH_CS; static volatile LONG SH_INIT;
+static void sh_lock(void) {
+    if (SH_INIT != 2) { if (InterlockedCompareExchange(&SH_INIT, 1, 0) == 0) { InitializeCriticalSection(&SH_CS); InterlockedExchange(&SH_INIT, 2); } else while (SH_INIT != 2) Sleep(0); }
+    EnterCriticalSection(&SH_CS);
+}
+static void sh_unlock(void) { LeaveCriticalSection(&SH_CS); }
+static double G_CX, G_CY; static int G_STARS;
+void shrink_grid_info(double *cx, double *cy, int *st) { sh_lock(); if (cx) *cx = G_CX; if (cy) *cy = G_CY; if (st) *st = G_STARS; sh_unlock(); }
+static void grid_note(double cx, double cy, int st, const char *line) {     /* the last grid, as one; logged when it changes */
+    static double lx = -1, ly = -1; static int ls = -1; int changed;
+    sh_lock(); G_CX = cx; G_CY = cy; G_STARS = st;
+    changed = fabs(cx - lx) > 0.01 || fabs(cy - ly) > 0.01 || st != ls; lx = cx; ly = cy; ls = st; sh_unlock();
+    if (changed) vlog(VLOG_INFO, "shrink", "%s", line);
+}
+static double grid_find(const double *prof, int n, double s_max, double *best_off, double *score) {   /* returns the step (0: none), *best_off; *score: the weaker axis's */
     double mean = 0, best = 0, bs = 0, bo = 0, s, o; int i;
     struct { double s, o, sc; } cand[512]; int nc = 0;
     for (i = 1; i < n; i++) mean += prof[i];
@@ -355,7 +371,7 @@ static double grid_find(const double *prof, int n, double s_max, double *best_of
         cand[nc].s = s; cand[nc].o = bof; cand[nc].sc = bsc / mean; if (cand[nc].sc > best) best = cand[nc].sc; nc++;
     }
     for (i = 0; i < nc; i++) if (cand[i].sc >= best * 0.92) { bs = cand[i].s; bo = cand[i].o; break; }   /* the smallest step nearly as good (its multiples score as well) */
-    if (GRID_LAST_SCORE == 0 || best < GRID_LAST_SCORE) GRID_LAST_SCORE = best;      /* the weaker axis decides */
+    if (*score == 0 || best < *score) *score = best;      /* the weaker axis decides */
     *best_off = bo;
     return best >= 1.6 ? bs : -best;
 }
@@ -372,20 +388,18 @@ static Span *grid_spans(int n, double step, double off, int *count) {     /* eac
     *count = k; return sp;
 }
 static void m_grid(float *const pl[4], int cw, int ch, int w, int h, float *rs[4], const unsigned char *pal, int np) {
-    double *px = calloc((size_t)cw, sizeof(double)), *py = calloc((size_t)ch, sizeof(double)), ox = 0, oy = 0, sx, sy; int x, y, j;
-    GRID_LAST_SCORE = 0;
+    double *px = calloc((size_t)cw, sizeof(double)), *py = calloc((size_t)ch, sizeof(double)), ox = 0, oy = 0, sx, sy, score = 0; int x, y, j; char line[300];
     for (y = 0; y < ch; y++) for (x = 0; x < cw; x++) {
         size_t k = (size_t)y * cw + x; double d;
         if (x) { d = fabs(pl[3][k] - pl[3][k - 1]); for (j = 0; j < 3; j++) d += fabs(pl[j][k] - pl[j][k - 1]); px[x] += d; }
         if (y) { d = fabs(pl[3][k] - pl[3][k - cw]); for (j = 0; j < 3; j++) d += fabs(pl[j][k] - pl[j][k - cw]); py[y] += d; }
     }
-    sx = grid_find(px, cw, (double)cw / w * 1.5 > 3.5 ? (double)cw / w * 1.5 : 3.5, &ox);
-    sy = grid_find(py, ch, (double)ch / h * 1.5 > 3.5 ? (double)ch / h * 1.5 : 3.5, &oy);
-    G_SCORE = GRID_LAST_SCORE;
+    sx = grid_find(px, cw, (double)cw / w * 1.5 > 3.5 ? (double)cw / w * 1.5 : 3.5, &ox, &score);
+    sy = grid_find(py, ch, (double)ch / h * 1.5 > 3.5 ? (double)ch / h * 1.5 : 3.5, &oy, &score);
     free(px); free(py);
     if (sx <= 0 || sy <= 0) {            /* no grid: Majority */
-        G_CX = G_CY = 0; G_STARS = 0;
-        vlog(VLOG_INFO, "shrink", "grid snap: no clear grid (best %.2f / %.2f times the average edge): Majority", -sx, -sy);
+        snprintf(line, sizeof line, "grid snap: no clear grid (best %.2f / %.2f times the average edge): Majority", -sx, -sy);
+        grid_note(0, 0, 0, line);
         m_cells(pl, cw, ch, w, h, M_MAJORITY, rs, pal, np); return;
     }
     {   int nx, ny, c; Span *gx = grid_spans(cw, sx, ox, &nx), *gy = grid_spans(ch, sy, oy, &ny); float *cl[4];
@@ -394,9 +408,9 @@ static void m_grid(float *const pl[4], int cw, int ch, int w, int h, float *rs[4
         m_cells(cl, nx, ny, w, h, M_MAJORITY, rs, pal, np);                  /* the clean cells: into the sprite */
         for (c = 0; c < 4; c++) free(cl[c]);
         free(gx); free(gy);
-        G_CX = sx; G_CY = sy;
-        G_STARS = G_SCORE >= 3.0 ? 3 : G_SCORE >= 2.2 ? 2 : 1;      /* 1 to 3: how far the grid's lines stand out */
-        vlog(VLOG_INFO, "shrink", "grid snap: cells %.2f x %.2f px (offset %.2f, %.2f), %d x %d cells into %d x %d, lines %.2f times the average edge (%d of 3)", sx, sy, ox, oy, nx, ny, w, h, G_SCORE, G_STARS);
+        {   int st = score >= 3.0 ? 3 : score >= 2.2 ? 2 : 1;      /* 1 to 3: how far the grid's lines stand out */
+            snprintf(line, sizeof line, "grid snap: cells %.2f x %.2f px (offset %.2f, %.2f), %d x %d cells into %d x %d, lines %.2f times the average edge (%d of 3)", sx, sy, ox, oy, nx, ny, w, h, score, st);
+            grid_note(sx, sy, st, line); }
     }
 }
 /* DPID (Weber 2016): weights (|I(q) - G(p)| / Vmax) ^ lambda over the sprite pixel's area, G the area means smoothed
@@ -651,7 +665,7 @@ static int wu(const unsigned char *px, int W, int H, int N, int (*pal)[3]) {
 }
 #undef WI
 static unsigned char GPAL[256 * 3]; static int GPAL_N;
-void shrink_set_palette(const unsigned char *rgb, int n) { if (n > 256) n = 256; if (n < 0) n = 0; if (n) memcpy(GPAL, rgb, (size_t)n * 3); GPAL_N = n; }
+void shrink_set_palette(const unsigned char *rgb, int n) { if (n > 256) n = 256; if (n < 0) n = 0; sh_lock(); if (n) memcpy(GPAL, rgb, (size_t)n * 3); GPAL_N = n; sh_unlock(); }
 typedef struct { int lo, hi; } Box;
 static int g_axis;
 static int cmp_axis(const void *a, const void *b) { return ((const int *)a)[g_axis] - ((const int *)b)[g_axis]; }
@@ -831,9 +845,10 @@ int shrink(const unsigned char *drw, int dw, int dh, const unsigned char *orig, 
         }
         if (o->colours == C_KMEANS) np = kmeans(out, W, H, o->ncol, pal, o->dist, o->kmpp);
         if (o->colours == C_WU) np = wu(out, W, H, o->ncol, pal);
-        if (o->colours == C_PALETTE && GPAL_N) { for (np = 0; np < GPAL_N; np++) { pal[np][0] = GPAL[np * 3]; pal[np][1] = GPAL[np * 3 + 1]; pal[np][2] = GPAL[np * 3 + 2]; } }
+        if (o->colours == C_PALETTE) { int gn; sh_lock(); gn = GPAL_N;      /* copied whole under the lock: never half old, half new */
+            for (np = 0; np < gn; np++) { pal[np][0] = GPAL[np * 3]; pal[np][1] = GPAL[np * 3 + 1]; pal[np][2] = GPAL[np * 3 + 2]; } sh_unlock(); }
         if (o->colours == C_MEDIANCUT) np = mediancut(out, W, H, o->ncol, pal);
-        usepal = o->colours == C_ORIGINAL || o->colours == C_SHADES || o->colours == C_KMEANS || o->colours == C_MEDIANCUT || o->colours == C_WU || (o->colours == C_PALETTE && GPAL_N);
+        usepal = o->colours == C_ORIGINAL || o->colours == C_SHADES || o->colours == C_KMEANS || o->colours == C_MEDIANCUT || o->colours == C_WU || (o->colours == C_PALETTE && np > 0);
         if (np && usepal && o->regions && !o->dither) {
             /* by region: patches of like colour (Lab within 12 of the patch's first pixel, 4-connected) each take the
                palette colour most of their pixels are nearest to (Lab) */
