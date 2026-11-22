@@ -2051,6 +2051,8 @@ static int get_file(const MFile *f) {
     snprintf(dir, sizeof dir, "%s\\%s", P_SHARED, f->dir); mkdirs(dir);
     { WIN32_FILE_ATTRIBUTE_DATA fa; if (GetFileAttributesExA(part, GetFileExInfoStandard, &fa)) have = ((long long)fa.nFileSizeHigh << 32) | fa.nFileSizeLow; }
     if (have > f->size) have = 0;
+    if (have == f->size && have > 0) {     /* all here already, never named (a check cut short, a crash): no request, the check (review 3, P2-1) */
+        dl_say("%s is all here already: checking it", f->name); S.dl_done += have; goto whole; }
     if (!net) net = WinHttpOpen(L"voxup/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!net) net = WinHttpOpen(L"voxup/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!net) { dl_say("Could not use the internet (WinHTTP): %s", vlog_errno()); return 0; }
@@ -2076,6 +2078,11 @@ static int get_file(const MFile *f) {
     WinHttpQueryHeaders(rq, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &code, &sz, WINHTTP_NO_HEADER_INDEX);
     if (code == 401 || code == 403) { S.need_token = 1;
         dl_say("This model needs a free Hugging Face login: make one at https://huggingface.co/join, accept the model's terms on its page, then paste a read token below (%s, HTTP %lu).", f->name, code); goto done; }
+    if (code == 416 && have > 0) {      /* the server has nothing past the part: it is whole only if it is the file's size */
+        if (have == f->size) { S.dl_done += have; goto whole; }
+        vlog(VLOG_WARN, "get", "%s: the server has %lld bytes or fewer, models.txt says %lld: the part is removed", part, have, f->size);
+        if (!DeleteFileA(part)) vlog(VLOG_ERR, "get", "could not remove %s: %s", part, vlog_errno());
+        dl_say("%s on the server is not the size models.txt says: the part was removed (HTTP 416).", f->name); goto done; }
     if (code == 200) have = 0;                     /* the whole file came, not the rest: start the part again */
     else if (code != 206) { dl_say("%s: the server said HTTP %lu", f->name, code); goto done; }
     if (!(o = fopen(part, have ? "ab" : "wb"))) { dl_say("Could not write %s: %s", part, vlog_errno()); goto done; }
@@ -2090,6 +2097,7 @@ static int get_file(const MFile *f) {
         { static DWORD last; if (GetTickCount() - last > 500) { last = GetTickCount(); if (S.wnd) PostMessageA(S.wnd, WM_APP, 0, 0); } }
     }
     fclose(o); o = NULL;
+whole:
     if (have != f->size) { dl_say("%s came out %lld bytes, not %lld: kept as .part, Get tries again", f->name, have, f->size); goto done; }
     if (f->sha[0]) {     /* the file as its maker put it up: else the part goes (a bad one never gets a real name) */
         char hx[65]; int k;
