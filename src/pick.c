@@ -2707,9 +2707,17 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
         Round *R = S.nr ? &S.r[S.cur] : NULL; int r, c, kdone = 0, dbl = -1, rclick = -1;
         /* Draw and Stop over the pictures, the status line under them: always in sight */
         { static const float RT[] = { 0.66f, 0.34f }; nk_layout_row(ctx, NK_DYNAMIC, 32, 2, RT); }
-        if (S.ing >= 360) snprintf(lab, sizeof lab, S.nr ? "New %d seeds  (Space)" : "Draw %d  (Space)", round_size());
-        else snprintf(lab, sizeof lab, S.nr ? "New %d" : "Draw %d", round_size());
-        if (button(ctx, lab, 1, !busy && round_size() > 0 && round_size() <= MAXSHOT)) start_round();
+        {   int ready = 0, rec = -1; for (i = 0; i < S.nm; i++) { ready += S.m[i].ready; if (S.m[i].recommended && usable(i) && rec < 0) rec = i; }
+            if (!ready && (rec >= 0 || S.dl_busy)) {    /* no model yet: Get where Draw is, one click (review 3, P3-2) */
+                if (S.dl_busy) snprintf(lab, sizeof lab, "Getting a model...");
+                else snprintf(lab, sizeof lab, S.ing >= 360 ? "Get %s first (%.1f GB)" : "Get a model", S.m[rec].name, gb(model_missing(rec)));
+                if (button(ctx, lab, 1, !S.dl_busy && !S.lic_ask)) { if (S.fold[0]) fold_set(0, 0); start_get(rec); }
+            } else {
+                if (S.ing >= 360) snprintf(lab, sizeof lab, S.nr ? "New %d seeds  (Space)" : "Draw %d  (Space)", round_size());
+                else snprintf(lab, sizeof lab, S.nr ? "New %d" : "Draw %d", round_size());
+                if (button(ctx, lab, 1, !busy && round_size() > 0 && round_size() <= MAXSHOT)) start_round();
+            }
+        }
         if (button(ctx, S.stop && busy ? "Stopping..." : S.ing >= 360 ? "Stop  (Esc)" : "Stop", 0, busy && !S.stop)) {
             InterlockedExchange(&S.stop, 1); status("Stopping after this picture..."); S.qrun = 0;
 #if SD_BUILT
@@ -2747,7 +2755,7 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
         if (R) { int stale = 0; for (i = 0; i < R->n; i++) { kdone += R->s[i].st == ST_DONE; stale += R->s[i].st == ST_DONE && R->s[i].gen != S.optgen; }
                  if (stale) snprintf(lab, sizeof lab, "Round %d of %d: remaking %d...", S.cur + 1, S.nr, stale);
                  else snprintf(lab, sizeof lab, "Round %d of %d: %d drawn", S.cur + 1, S.nr, kdone); }
-        else snprintf(lab, sizeof lab, "No pictures yet: press Draw");
+        else { int rd = 0; for (i = 0; i < S.nm; i++) rd += S.m[i].ready; snprintf(lab, sizeof lab, rd ? "No pictures yet: press Draw" : "No model yet: Get one above"); }
         {   struct nk_rect lb; if (S.ing < 360) nk_layout_row_dynamic(ctx, 20, 1);
             lb = nk_widget_bounds(ctx); nk_label_colored(ctx, lab, NK_TEXT_LEFT, GOLD);
             if (nk_input_is_mouse_hovering_rect(&ctx->input, lb)) nk_ext_tooltip(ctx, lab); }
@@ -2755,6 +2763,11 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
         if (S.ing < 720) nk_layout_row_dynamic(ctx, 28, S.ing >= 300 ? 2 : 1);
         if (button(ctx, "Original's colours", S.opt.colours == C_ORIGINAL, 1)) S.opt.colours = C_ORIGINAL;
         if (button(ctx, "Model's colours", S.opt.colours == C_OWN, 1)) S.opt.colours = C_OWN;
+        if (S.fold[1]) {   /* the right side folded: Keep (else only there) over the pictures too (review 3, P3-1) */
+            Shot *ks = S.sel >= 0 && S.nr && S.sel < S.r[S.cur].n ? &S.r[S.cur].s[S.sel] : NULL;
+            nk_layout_row_dynamic(ctx, 30, 1);
+            if (button(ctx, ks && ks->st == ST_DONE ? "Keep this one (Enter)" : "Keep (click a picture first)", 1, ks && ks->st == ST_DONE)) keep_next();
+        }
         if (S.ing < 360 && S.np) {      /* a narrow grid: the presets as one list, so the pictures stay in sight (P2-4) */
             static const int TW[] = { 50, 0 }; int now = preset_now(), p; char cur[48];
             snprintf(cur, sizeof cur, "%s", now >= 0 ? S.pname[now] : "(own settings)");
