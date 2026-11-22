@@ -27,6 +27,7 @@
 #include <math.h>
 #include <stdio.h>
 #include "shrink.h"
+#include "vlog.h"
 
 const char *const METHOD_NAMES[M_COUNT] = { "Lanczos", "Nearest", "Box (area)", "Bilinear", "Bicubic", "Mitchell", "Gaussian",
                                             "Median", "Majority", "DPID (2016)", "SAID (2025)", "Superpixels (2012)",
@@ -89,7 +90,7 @@ const char *shrink_describe(const ShrinkOpt *o, char *buf, int n) {
 }
 
 /* ---------------------------------------------------------------- resampling: Pillow's weights for any kernel */
-static void *xm(size_t n) { void *p = malloc(n ? n : 1); if (!p) { fputs("shrink: out of memory\n", stderr); exit(3); } return p; }
+static void *xm(size_t n) { void *p = malloc(n ? n : 1); if (!p) { vlog(VLOG_ERR, "shrink", "out of memory (%zu bytes)", n); vlog_close(); exit(3); } return p; }
 static double sincf(double x) { if (x == 0.0) return 1.0; x *= 3.14159265358979323846; return sin(x) / x; }
 static double k_lanczos(double x) { if (-3.0 <= x && x < 3.0) return sincf(x) * sincf(x / 3); return 0.0; }
 static double k_box(double x) { return x > -0.5 && x <= 0.5 ? 1.0 : 0.0; }

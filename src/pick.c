@@ -505,7 +505,8 @@ static struct {
     /* 2026-11-21, fewer clicks: keys (none while a text box is typed in), the item filter, the queue, presets,
        the item's own settings, the Compare tab, each picture's progress */
     int typing, find_focus, find_typing, auto_next; char find[48]; signed char tilt[512];   /* tilt: -1 not measured */
-    int desc_made; const char *desc_word;      /* the upright description was made from the other; a tilt word left in it */
+    int desc_made; const char *desc_word;
+    char problem[400]; int prob_seen;          /* the last WARN/ERR, shown under the status until clicked (review A11) */      /* the upright description was made from the other; a tilt word left in it */
     int queue[512], nq, qrun;                   /* items to draw a round of, in turn (work\queue.txt) */
     int own_opt; ShrinkOpt gopt; int opt_loaded; /* the item has its own settings (NNN\shrink.txt); everyone else's */
     char pname[16][32], pset[16][400]; int np, nbuiltin; char newpreset[32];
@@ -973,7 +974,7 @@ static void choose(int pos) {
     snprintf(p, sizeof p, "%s\\%03d.png", P_SPRITES, item);
     if ((d = load_rgba(p, &w, &h))) { if (w == 16 && h == 16) { memcpy(S.orig, d, sizeof S.orig); S.bm_orig = mkbmp(S.orig, 16, 16, 6, 0); S.pv_orig = mkbmp(S.orig, 16, 16, 12, 0); S.bm_mini = mkbmp(S.orig, 16, 16, 2, 0); } stbi_image_free(d); }
     snprintf(p, sizeof p, "%s\\%03d.png", P_ENLARGED, item);
-    if (P_ENLARGED[0] && (d = load_rgba(p, &w, &h))) { if (w == 32 && h == 32) { memcpy(S.tool, d, sizeof S.tool); S.bm_tool = mkbmp(S.tool, 32, 32, 3, 0); } stbi_image_free(d); }
+    if (P_ENLARGED[0] && (d = load_rgba(p, &w, &h))) { if (w == 32 && h == 32) { memcpy(S.tool, d, sizeof S.tool); S.bm_tool = mkbmp(S.tool, 32, 32, 3, 0); } else vlog(VLOG_WARN, "pick", "%s is %d x %d, not 32 x 32: not used", p, w, h); stbi_image_free(d); }
     load_upright(item, 0);
     if (S.has_up) { S.bm_up = mkbmp(S.up, 32, 32, 3, 0); S.pv_up = mkbmp(S.up, 32, 32, 6, 0); }
     /* what the models are given: from.txt, else the upright picture when there is one, else our tool's */
@@ -1075,6 +1076,7 @@ static unsigned char *make_input(int item) {
     } else if (S.from == FROM_TOOL) {
         snprintf(p, sizeof p, "%s\\raw\\%03d_in.raw", P_ENLARGED, item);
         if (P_ENLARGED[0] && (raw = read_all(p, &len)) && len < 8) { free(raw); raw = NULL; }
+        if (!raw) vlog(VLOG_WARN, "draw", "%03d: drawing from our tool's picture, but %s is %s: the models get the 16 x 16 original", item, p, P_ENLARGED[0] ? "missing or empty" : "not set (voxup.ini enlarged =)");
     }
     if (!raw) {
         /* no enlarged picture (raw\NNN_in.raw: width, height as 4-byte ints, then RGBA): the original sprite itself */
@@ -2180,6 +2182,14 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
         nk_layout_row_end(ctx);
         nk_layout_row_dynamic(ctx, 36, 1);
         EnterCriticalSection(&S.cs); snprintf(lab, sizeof lab, "%.400s%s", S.status, S.sdstep); LeaveCriticalSection(&S.cs); nk_label_colored_wrap(ctx, lab, GOLD);
+        if (vlog_problems() != S.prob_seen) { S.prob_seen = vlog_problems(); snprintf(S.problem, sizeof S.problem, "%s", vlog_last()); }
+        if (S.problem[0]) {     /* every WARN/ERR reaches the user: the last one, its path and reason, until clicked */
+            char pl[460]; struct nk_rect pb;
+            snprintf(pl, sizeof pl, "Problem: %.400s  (click to clear; all in voxup.log)", S.problem);
+            nk_layout_row_dynamic(ctx, 18, 1); pb = nk_widget_bounds(ctx); nk_label_colored(ctx, pl, NK_TEXT_LEFT, GOLD);
+            if (nk_input_is_mouse_click_down_in_rect(&ctx->input, NK_BUTTON_LEFT, pb, nk_true)) S.problem[0] = 0;
+            if (nk_input_is_mouse_hovering_rect(&ctx->input, pb)) nk_tooltip(ctx, S.problem);
+        }
         nk_layout_row_begin(ctx, NK_STATIC, 28, 6);
         nk_layout_row_push(ctx, 80); if (button(ctx, "< Back", 0, S.cur > 0)) { S.cur--; S.sel = -1; kick_reshape(); }
         nk_layout_row_push(ctx, 80); if (button(ctx, "Next >", 0, S.cur < S.nr - 1)) { S.cur++; S.sel = -1; kick_reshape(); }

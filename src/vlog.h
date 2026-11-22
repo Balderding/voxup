@@ -23,6 +23,7 @@ void vlog_echo(int on);                               /* batch: ERR/WARN also go
 const char *vlog_errno(void);                         /* strerror(errno), or the Windows GetLastError() text */
 const char *vlog_last(void);                          /* last ERR/WARN message ("" if none) */
 int vlog_errors(void);
+int vlog_problems(void);                              /* ERR + WARN lines this run: the window shows a new one */
 #ifdef __cplusplus
 }
 #endif

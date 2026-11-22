@@ -9,7 +9,7 @@
 #include <windows.h>
 #endif
 
-static FILE *lf; static int dbg, echo, nerr; static char last[512], errbuf[256];
+static FILE *lf; static int dbg, echo, nerr; static volatile long nprob; static char last[512], errbuf[256];
 static const char *LV[] = { "ERR ", "WARN", "INFO", "DBG " };
 
 void vlog_open(const char *path, int debug) {
@@ -60,7 +60,7 @@ void vlog(int level, const char *area, const char *fmt, ...) {
     if (level == VLOG_DBG && !dbg) return;
     va_start(ap, fmt); vsnprintf(msg, sizeof msg, fmt, ap); va_end(ap);
     if (level == VLOG_ERR) nerr++;
-    if (level <= VLOG_WARN) { strncpy(last, msg, sizeof last - 1); last[sizeof last - 1] = 0; }
+    if (level <= VLOG_WARN) { strncpy(last, msg, sizeof last - 1); last[sizeof last - 1] = 0; nprob++; }
 #ifdef _WIN32
     { SYSTEMTIME st; GetLocalTime(&st); ms = st.wMilliseconds; }
     localtime_s(&tmv, &now);
@@ -76,3 +76,5 @@ void vlog(int level, const char *area, const char *fmt, ...) {
         if (level <= VLOG_WARN) { fprintf(stderr, "%s: %s\n", level == VLOG_ERR ? "error" : "warning", msg); fflush(stderr); }          /* INFO stays in the log: batch prints its own progress */
     }
 }
+
+int vlog_problems(void) { return (int)nprob; }
