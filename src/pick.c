@@ -601,6 +601,7 @@ static struct {
     volatile LONG dl_busy, dl_stop; int dl_model; volatile LONGLONG dl_done, dl_total; char dl_msg[300];
     unsigned char orig[16 * 16 * 4], tool[32 * 32 * 4], up[32 * 32 * 4];
     unsigned char upfit[16 * 16 * 4];           /* the upright picture's box at 16 x 16, in the original's colours */
+    unsigned char upfit32[32 * 32 * 4];         /* the same box at 32 x 32, exact (not snapped to the 16 grid; A17) */
     int has_up, from, upfrom;                   /* an upright picture found; what the models are given (FROM_*) */
     /* the upright picture: hand-made (an upright = folder) or made here (NNN\upright.png, settings in NNN\upright.txt) */
     int up_hand, up_mode, up_style, up_slim;    /* UPM_*, 0 classic / 1 centred, UP_SLIM_* */
@@ -798,6 +799,17 @@ static void set_res(Shot *s, const unsigned char *px, int w, int h, LONG gen) {
 }
 /* the picture a drawing is shrunk to: its box sets the sprite's place, its colours the palette */
 static const unsigned char *fitpic(int src) { return src == FROM_UP && S.has_up ? S.upfit : S.orig; }
+/* the picture shrink() fits a drawing into, and its size: an upright drawing into the upright picture's own box at
+   32 x 32 (A17: the 16 x 16 box snapped it to even pixels), the size setting kept: 32 x 32 is that box's own size,
+   16 x 16 a custom 16 x 16 */
+static const unsigned char *fit_for(int src, ShrinkOpt *oo, int *w, int *h) {
+    if (src == FROM_UP && S.has_up) {
+        if (oo->size == SZ_32) oo->size = SZ_16;
+        else if (oo->size == SZ_16) { oo->size = SZ_CUSTOM; oo->cw = 16; oo->ch = 16; }
+        *w = *h = 32; return S.upfit32;
+    }
+    *w = *h = 16; return S.orig;
+}
 /* Outline auto decided here: the box fitpic gives for an upright drawing has no black in it, so the upright picture
    itself is asked (the same rule, shrink.c orig_outlined) */
 static void outline_for(ShrinkOpt *o, int src) {
@@ -813,7 +825,8 @@ static void reshape_one(int item, Shot *s, const ShrinkOpt *o, LONG gen) {
     shrink_size(o, 16, 16, &W, &H);
     { ShrinkOpt oo = *o; outline_for(&oo, s->src);
       out = xmalloc(128 * 128 * 4);
-      if (shrink(s->drw, s->dw, s->dh, fitpic(s->src), 16, 16, &oo, out)) set_res(s, out, W, H, gen); else s->gen = gen;
+      { int fw, fh; const unsigned char *fp = fit_for(s->src, &oo, &fw, &fh);
+        if (shrink(s->drw, s->dw, s->dh, fp, fw, fh, &oo, out)) set_res(s, out, W, H, gen); else s->gen = gen; }
       free(out); }
 }
 /* the reshaper's thread: its item is fixed when it starts (never S.item, which choose() changes), and stop_reshape
@@ -980,7 +993,7 @@ static int up_make(int item) {
    with the original's colours: the shrink takes only a box and a colour set from the picture it fits to */
 static void load_upright(int item, int remake) {
     char p[MAX_PATH]; int i, w, h, x0, y0, x1, y1, x, y, nc = 0, k = 0; unsigned char *d, cols[256][3];
-    S.has_up = S.up_hand = 0; S.up_turn = 0; S.up_note[0] = 0; memset(S.upfit, 0, sizeof S.upfit);
+    S.has_up = S.up_hand = 0; S.up_turn = 0; S.up_note[0] = 0; memset(S.upfit, 0, sizeof S.upfit); memset(S.upfit32, 0, sizeof S.upfit32);
     for (i = 0; i < N_UPRIGHT && !S.has_up; i++) {
         snprintf(p, sizeof p, "%s\\%03d.png", P_UPRIGHT[i], item);
         if (!exists(p) || !(d = load_rgba(p, &w, &h))) continue;
@@ -1008,6 +1021,12 @@ static void load_upright(int item, int remake) {
         unsigned char *o = S.upfit + (y * 16 + x) * 4;
         o[0] = cols[k % nc][0]; o[1] = cols[k % nc][1]; o[2] = cols[k % nc][2]; o[3] = 255; k++;
     }
+    for (k = 0, y = y0; y <= y1 && y < 32; y++) for (x = x0; x <= x1 && x < 32; x++) {     /* the exact box, x1 and y1 included (A17) */
+        unsigned char *o = S.upfit32 + (y * 32 + x) * 4;
+        o[0] = cols[k % nc][0]; o[1] = cols[k % nc][1]; o[2] = cols[k % nc][2]; o[3] = 255; k++;
+    }
+    vlog(VLOG_INFO, "upright", "%03d: the upright picture's box x %d-%d y %d-%d (of 32); on the 16 grid it was x %d-%d y %d-%d",
+         item, x0, x1, y0, y1, x0 / 2 * 2, (x1 + 1) / 2 * 2 - 1, y0 / 2 * 2, (y1 + 1) / 2 * 2 - 1);
 }
 /* ---------------------------------------------------------------- shrink presets: one click (or F1-F8) each.
    A preset is "key=value ..." over the standard settings; the size, fit and colours stay as they are. Built-in ones first,
@@ -1892,7 +1911,7 @@ static void compare_make(Shot *s) {
     for (i = 0; i < S.np && i < 16; i++) {
         ShrinkOpt o = S.opt; preset_apply_to(&o, i); shrink_size(&o, 16, 16, &W, &H);
         outline_for(&o, s->src);
-        if (!shrink(d, dw, dh, fitpic(s->src), 16, 16, &o, out)) continue;
+        { int fw, fh; const unsigned char *fp = fit_for(s->src, &o, &fw, &fh); if (!shrink(d, dw, dh, fp, fw, fh, &o, out)) continue; }
         z = 96 / (W > H ? W : H); if (z < 1) z = 1;
         S.cmp_bm[i] = mkbmp(out, W, H, z, 0); S.cmp_w[i] = W * z; S.cmp_h[i] = H * z;
         S.cmp_bm1[i] = mkbmp(out, W, H, 1, 0); S.cmp_w1[i] = W; S.cmp_h1[i] = H;     /* as small as in the game */
