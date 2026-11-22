@@ -505,6 +505,7 @@ static struct {
     /* 2026-11-21, fewer clicks: keys (none while a text box is typed in), the item filter, the queue, presets,
        the item's own settings, the Compare tab, each picture's progress */
     int typing, find_focus, find_typing, auto_next; char find[48]; signed char tilt[512];   /* tilt: -1 not measured */
+    int desc_made; const char *desc_word;      /* the upright description was made from the other; a tilt word left in it */
     int queue[512], nq, qrun;                   /* items to draw a round of, in turn (work\queue.txt) */
     int own_opt; ShrinkOpt gopt; int opt_loaded; /* the item has its own settings (NNN\shrink.txt); everyone else's */
     char pname[16][32], pset[16][400]; int np, nbuiltin; char newpreset[32];
@@ -749,8 +750,18 @@ static void swap_all(char *s, size_t n, const char *from, const char *to) {
 static void upright_words(const char *in, char *out, size_t n) {
     static const char *SW[][2] = {
         { "lying diagonally", "standing straight upright" }, { "lies diagonally", "stands straight upright" },
+        { "from the upper left to the lower right", "from the top to the bottom" },
+        { "from the upper right to the lower left", "from the top to the bottom" },
+        { "from the lower right to the upper left", "from the bottom to the top" },
+        { "from the lower left to the upper right", "from the bottom to the top" },
         { "at the upper left", "at the top" }, { "at the lower right", "at the bottom" },
         { "at the upper right", "at the top" }, { "at the lower left", "at the bottom" },
+        { "to the lower right", "to the bottom" }, { "to the lower left", "to the bottom" },
+        { "to the upper left", "to the top" }, { "to the upper right", "to the top" },
+        { "the upper left", "the top" }, { "the upper right", "the top" },
+        { "the lower right", "the bottom" }, { "the lower left", "the bottom" },
+        { "upper left", "top" }, { "upper right", "top" }, { "lower right", "bottom" }, { "lower left", "bottom" },
+        { "diagonally", "upright" }, { "diagonal", "upright" },
         { "picture's length", "picture's height" } };
     size_t i;
     snprintf(out, n, "%s", in);
@@ -761,6 +772,12 @@ static void upright_words(const char *in, char *out, size_t n) {
     }
     for (i = 0; i < sizeof SW / sizeof SW[0]; i++) swap_all(out, n, SW[i][0], SW[i][1]);
 }
+/* a word left in an upright description that still says it lies tilted (review A8) */
+static const char *tilt_word(const char *t) {
+    static const char *W[] = { "upper left", "upper right", "lower left", "lower right", "diagonal", "lying", "slant", "tilted" };
+    size_t i; for (i = 0; i < sizeof W / sizeof W[0]; i++) if (strstr(t, W[i])) return W[i];
+    return NULL;
+}
 static void load_desc_text(int item) {
     char p[MAX_PATH], *t;
     desc_path(item, S.from, p, sizeof p);
@@ -769,7 +786,7 @@ static void load_desc_text(int item) {
         char *o = NULL; desc_path(item, FROM_TOOL, p, sizeof p);
         if ((o = read_all(p, NULL)) || S.desc[item]) {
             const char *src = o ? o : S.desc[item]; size_t n = strlen(src) + 200; t = xmalloc(n); upright_words(src, t, n); free(o);
-            status("%03d: no upright description yet: made one from the other (check it before drawing).", item);
+            S.desc_made = 1; S.desc_word = tilt_word(t);
         }
     }
     if (t) { wrap(t, S.descbuf, sizeof S.descbuf, 34); free(t); }
@@ -965,6 +982,7 @@ static void choose(int pos) {
     if ((t = read_all(p, NULL))) { int f; for (f = 0; f < 3; f++) if (!strncmp(t, FROM_NAMES[f], strlen(FROM_NAMES[f]))) S.from = f; free(t); }
     if (S.from == FROM_UP && !S.has_up) S.from = FROM_TOOL;
     if (S.from == FROM_TOOL && !S.bm_tool) S.from = S.has_up ? FROM_UP : FROM_ORIG;   /* no tool picture: never point at an empty slot */
+    S.desc_made = 0; S.desc_word = NULL;
     load_desc_text(item);
     {   char *rj = NULL, *rf; itemdir(item, p, sizeof p); strcat(p, "\\rejected.txt");
     if ((rf = read_all(p, NULL))) { size_t n = strlen(rf); rj = xmalloc(n + 3); rj[0] = '\n'; memcpy(rj + 1, rf, n); rj[n + 1] = '\n'; rj[n + 2] = 0; free(rf);
@@ -994,7 +1012,9 @@ static void choose(int pos) {
     S.cur = S.nr ? S.nr - 1 : 0;
     read_kept(item);
     kick_reshape();
-    status(S.nr ? "%03d %s: %d earlier round(s) loaded." : "%03d %s: press Draw 20.", item, S.name[item], S.nr);
+    if (S.desc_made && S.desc_word) status("%03d: its upright description was made from the other and still says \"%s\": fix it before drawing (the models follow the words).", item, S.desc_word);
+    else if (S.desc_made) status("%03d: its upright description was made from the other one: check it before drawing.", item);
+    else status(S.nr ? "%03d %s: %d earlier round(s) loaded." : "%03d %s: press Space to draw.", item, S.name[item], S.nr);
 }
 
 /* ---------------------------------------------------------------- the worker: ComfyUI started if needed, the round drawn */
@@ -2070,7 +2090,8 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
         }
         nk_layout_row_dynamic(ctx, 20, 1);
         if (S.keptinfo[0]) nk_label_colored(ctx, S.keptinfo, NK_TEXT_LEFT, TEAL2); else nk_label_colored(ctx, "Not kept yet", NK_TEXT_LEFT, DIM);
-        nk_label_colored(ctx, "What it is (goes into the prompt)", NK_TEXT_LEFT, GOLD);
+        if (S.desc_made) nk_label_colored(ctx, S.desc_word ? "What it is: made from the other, still says it lies tilted" : "What it is: made from the other, check it", NK_TEXT_LEFT, GOLD);
+        else nk_label_colored(ctx, "What it is (goes into the prompt)", NK_TEXT_LEFT, GOLD);
         nk_layout_row_dynamic(ctx, 110, 1);
         nk_edit_string_zero_terminated(ctx, NK_EDIT_BOX, S.descbuf, sizeof S.descbuf, nk_filter_default);
         /* 2026-11-21: the models (models.txt): how many pictures each draws; Only = this one alone; Get = download it */
