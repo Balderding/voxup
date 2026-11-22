@@ -25,7 +25,7 @@ static int wrap_lines(const struct nk_user_font *f, const char *t, float w) {
     return lines;
 }
 struct nk_rect nk_ext_wrap_label(struct nk_context *ctx, const char *t, struct nk_color c, int w) {
-    const struct nk_user_font *f = ctx->style.font; int lines = w > 40 ? wrap_lines(f, t, (float)w - 2 * ctx->style.text.padding.x) : 2; struct nk_rect b;
+    const struct nk_user_font *f = ctx->style.font; int lines = w > 40 ? wrap_lines(f, t, (float)w - 2 * ctx->style.text.padding.x - 8) : 2; struct nk_rect b;
     if (lines > 8) lines = 8;
     nk_layout_row_dynamic(ctx, 18.0f * (float)lines + 2, 1); b = nk_widget_bounds(ctx); nk_label_colored_wrap(ctx, t, c);
     return b;

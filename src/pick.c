@@ -556,7 +556,7 @@ static struct {
     char problem[400]; int prob_seen;          /* the last WARN/ERR, shown under the status until clicked (review A11) */      /* the upright description was made from the other; a tilt word left in it */
     int queue[512], nq, qrun;                   /* items to draw a round of, in turn (work\queue.txt) */
     int own_opt; ShrinkOpt gopt; int opt_loaded; /* the item has its own settings (NNN\shrink.txt); everyone else's */
-    char pname[16][32], pset[16][400]; int np, nbuiltin; char newpreset[32];
+    char pname[16][32], pset[16][400]; int np, nbuiltin; char newpreset[32]; unsigned char phid[16];   /* phid: a Compare-only preset (not on the bar, no F key) */
     int cmp_for; LONG cmp_gen; HBITMAP cmp_bm[17]; int cmp_w[17], cmp_h[17]; char cmp_score[17][64];
     volatile LONG sd_step, sd_steps; DWORD draw_t0; DWORD avg_ms[MAXM]; int nkeeps;
     int show_get, nget, unfocus; WINDOWPLACEMENT wp; int have_wp;   /* models to get shown; Esc in a text box; the window's place */
@@ -950,6 +950,8 @@ static const char *const PRESET_B[][2] = {
     { "Standard", "" }, { "Clean patches", "regions=1 dist=1" }, { "Sword", "regions=1 dist=1 notch=1 blocks=1" },
     { "Round thing", "regions=1 dist=1 orphans=1 jaggies=1" }, { "No outline", "outline=0 edge=1" }, { "Outline auto", "outline=4" },
 };
+/* tried, kept as options, not better on our measures (B6, B7): in Compare only, to see them on a drawing */
+static const char *const PRESET_X[][2] = { { "Grid snap", "method=13" }, { "Edge specks off", "edgestray=1" } };
 /* kept when a preset is taken: the size and fit, and the colours chosen over the pictures (Original's / Model's) */
 static int size_key(const char *k) { return !strcmp(k, "size") || !strcmp(k, "cw") || !strcmp(k, "ch") || !strcmp(k, "fit") || !strcmp(k, "margin") || !strcmp(k, "colours") || !strcmp(k, "ncol"); }
 static void opt_parse(ShrinkOpt *o, const char *line) {      /* "key=value ..." onto o */
@@ -977,12 +979,11 @@ static int preset_now(void) {    /* the preset the settings are now, or -1 */
 }
 static void load_presets(void) {
     char p[MAX_PATH], *t, *l; int i;
-    S.np = 0;
+    S.np = 0; memset(S.phid, 0, sizeof S.phid);
     for (i = 0; i < (int)(sizeof PRESET_B / sizeof PRESET_B[0]); i++) { snprintf(S.pname[S.np], 32, "%s", PRESET_B[i][0]); snprintf(S.pset[S.np], 400, "%s", PRESET_B[i][1]); S.np++; }
     S.nbuiltin = S.np;
     snprintf(p, sizeof p, "%s\\presets.txt", WORK);
-    if (!(t = read_all(p, NULL))) return;
-    for (l = strtok(t, "\r\n"); l; l = strtok(NULL, "\r\n")) {
+    if ((t = read_all(p, NULL))) for (l = strtok(t, "\r\n"); l; l = strtok(NULL, "\r\n")) {     /* the user's own (the file may be missing) */
         char *bar = strchr(l, '|'); int k;
         if (!bar || bar == l) continue; *bar = 0;
         for (k = 0; k < S.np && strcmp(S.pname[k], l); k++) ;
@@ -990,6 +991,8 @@ static void load_presets(void) {
         snprintf(S.pname[k], 32, "%s", l); snprintf(S.pset[k], 400, "%s", bar + 1);
     }
     free(t);
+    for (i = 0; i < (int)(sizeof PRESET_X / sizeof PRESET_X[0]) && S.np < 16; i++) {
+        snprintf(S.pname[S.np], 32, "%s", PRESET_X[i][0]); snprintf(S.pset[S.np], 400, "%s", PRESET_X[i][1]); S.phid[S.np] = 1; S.np++; }
 }
 static void save_preset(const char *name) {
     char p[MAX_PATH], l[500], s[400];
@@ -1872,7 +1875,7 @@ static int hotkey(int vk) {
     case 'O': S.opt.colours = C_ORIGINAL; return 1;
     case 'M': S.opt.colours = C_OWN; return 1;
     }
-    if (vk >= VK_F1 && vk <= VK_F12 && vk - VK_F1 < S.np) { preset_apply_to(&S.opt, vk - VK_F1); status("Preset: %s", S.pname[vk - VK_F1]); return 1; }
+    if (vk >= VK_F1 && vk <= VK_F12 && vk - VK_F1 < S.np && !S.phid[vk - VK_F1]) { preset_apply_to(&S.opt, vk - VK_F1); status("Preset: %s", S.pname[vk - VK_F1]); return 1; }
     return 0;
 }
 
@@ -2160,7 +2163,8 @@ static void settings_panel(struct nk_context *ctx) {
     s_int(ctx, "Sharpen %", &o->sharpen, 0, 300, 10);
     }
     if (s_section(ctx, "Shrinking", 3)) {
-    s_combo(ctx, "Method", METHOD_NAMES, M_COUNT, &o->method);
+    if (o->method == M_GRID) { s_head(ctx, "Method: Grid snap (under More methods)"); }
+    else s_combo(ctx, "Method", METHOD_NAMES, M_COUNT - 1, &o->method);      /* Grid snap: under More methods */
     if (o->method == M_DPID) { s_int(ctx, "Detail (x100)", &o->dpid_lambda, 0, 300, 10); s_note(ctx, "DPID, Weber et al. 2016: pixels that stand out count more."); }
     if (o->method == M_SAID) { s_int(ctx, "Sharpen (x100)", &o->said_gamma, 0, 400, 10); s_int(ctx, "Edge texture", &o->said_alpha, 0, 200, 5); s_int(ctx, "Texture", &o->said_beta, 0, 200, 5);
         s_note(ctx, "SAID, Arjun et al. 2025: sharper along edges, texture kept."); }
@@ -2179,9 +2183,8 @@ static void settings_panel(struct nk_context *ctx) {
     s_int(ctx, "Fill pinholes", &o->pinholes, 0, 3, 1);
     }
     if (s_section(ctx, "Colours", 4)) {
-    s_combo(ctx, "Colours", COL, 7, &o->colours);
-    if (o->colours == C_KMEANS || o->colours == C_MEDIANCUT || o->colours == C_WU) s_int(ctx, "How many", &o->ncol, 2, 32, 1);
-    if (o->colours == C_KMEANS) s_check(ctx, "k-means++ seeds", &o->kmpp);
+    if (o->colours >= C_KMEANS) s_note(ctx, "Colours: found from the drawing (under More methods).");
+    else s_combo(ctx, "Colours", COL, 4, &o->colours);         /* the colour finders: under More methods */
     if (o->colours != C_OWN && o->colours != C_ASDRAWN) {
         s_combo(ctx, "Nearest by", DIST, 3, &o->dist);
         s_combo(ctx, "Dithering", DITH, 4, &o->dither);
@@ -2196,7 +2199,6 @@ static void settings_panel(struct nk_context *ctx) {
     if (line == 1) o->peel = 0; else { if (!o->peel) o->peel = 4; s_int(ctx, "Layers taken off", &o->peel, 1, 4, 1); }
     }
     if (s_section(ctx, "Clean-up", 6)) {
-    s_check(ctx, "Specks on the edge go (6 of 8 around empty)", &o->edgestray);
     s_check(ctx, "Lone pixels take their neighbours' colour", &o->orphans);
     s_check(ctx, "Doubled corners in lines off", &o->jaggies);
     }
@@ -2206,6 +2208,19 @@ static void settings_panel(struct nk_context *ctx) {
     s_check(ctx, "2 x 2 black blocks broken", &o->blocks);
     if (o->outline != O_NONE) s_int(ctx, "Thickness", &o->othick, 1, 4, 1);
     else s_combo(ctx, "Edge", EDGE, 2, &o->edge);
+    }
+    if (s_section(ctx, "More methods (tried; not better by default)", 8)) {
+        static const char *const FIND[] = { "No: the Colours above", "k-means", "Median cut", "Wu (1991)" };
+        static int before_grid = -1; int g = o->method == M_GRID, f = o->colours == C_KMEANS ? 1 : o->colours == C_MEDIANCUT ? 2 : o->colours == C_WU ? 3 : 0, f0 = f;
+        s_check(ctx, "Grid snap: the model's own pixel grid", &g);
+        if (g != (o->method == M_GRID)) { if (g) { before_grid = o->method; o->method = M_GRID; } else o->method = before_grid >= 0 && before_grid != M_GRID ? before_grid : M_SUPERPIXEL; }
+        s_note(ctx, "Helps models that draw fine fake pixels (pixel-art add-ons); on today's drawings it leaves a few more lone pixels.");
+        s_combo(ctx, "Colours found", FIND, 4, &f);
+        if (f != f0) o->colours = f == 1 ? C_KMEANS : f == 2 ? C_MEDIANCUT : f == 3 ? C_WU : C_ORIGINAL;
+        if (f) { s_int(ctx, "How many", &o->ncol, 2, 32, 1); if (f == 1) s_check(ctx, "k-means++ seeds", &o->kmpp); }
+        s_note(ctx, "Colours found from the drawing instead of the original's: helps when the original has too few colours for it. Wu and k-means++ keep the drawing's colours a little closer.");
+        s_check(ctx, "Specks on the edge go (6 of 8 around empty)", &o->edgestray);
+        s_note(ctx, "Helps drawings with loose specks at their edge; it can trim thin tips too.");
     }
     nk_layout_row_dynamic(ctx, 8, 1); nk_spacing(ctx, 1);
     nk_layout_row_dynamic(ctx, 28, 1);
@@ -2572,16 +2587,18 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
             nk_ext_row(ctx, 24, 2, TW); nk_label_colored(ctx, "Preset", NK_TEXT_LEFT, DIM);
             if (nk_combo_begin_label(ctx, cur, nk_vec2(220, 26.0f * S.np + 10))) {
                 nk_layout_row_dynamic(ctx, 22, 1);
-                for (p = 0; p < S.np; p++) if (nk_combo_item_label(ctx, S.pname[p], NK_TEXT_LEFT)) { preset_apply_to(&S.opt, p); status("Preset: %s", S.pname[p]); }
+                for (p = 0; p < S.np; p++) if (!S.phid[p] && nk_combo_item_label(ctx, S.pname[p], NK_TEXT_LEFT)) { preset_apply_to(&S.opt, p); status("Preset: %s", S.pname[p]); }
                 nk_combo_end(ctx);
             }
         } else
         {   /* the presets: one click each (F1, F2, ...), the one in use lit */
             int now = preset_now(), p, per = (S.ing - 50) / 96;     /* as many to a row as fit */
             if (per < 1) per = 1; if (per > 12) per = 12;
+            int shown = 0;
             for (p = 0; p < S.np; p++) {
                 struct nk_rect bb; char t[48];
-                if (p % per == 0) { int tw[13] = { 50 }; nk_ext_row(ctx, 24, per + 1, tw); nk_label_colored(ctx, p ? "" : "Preset", NK_TEXT_LEFT, DIM); }
+                if (S.phid[p]) continue;
+                if (shown++ % per == 0) { int tw[13] = { 50 }; nk_ext_row(ctx, 24, per + 1, tw); nk_label_colored(ctx, shown > 1 ? "" : "Preset", NK_TEXT_LEFT, DIM); }
                 bb = nk_widget_bounds(ctx);
                 snprintf(t, sizeof t, "%s", S.pname[p]);
                 if (button(ctx, t, p == now, 1)) { preset_apply_to(&S.opt, p); status("Preset: %s", S.pname[p]); }
