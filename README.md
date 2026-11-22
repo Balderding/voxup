@@ -71,6 +71,10 @@ The sprites in these pictures are from OpenGameArt and are CC0 (public domain):
 - A progress bar on the picture being drawn; **After Keep: the next new item**.
 - The models not on the computer yet are folded into one row; the window opens where it was left.
 - **Built-in engine**: models can run inside voxup (stable-diffusion.cpp on Vulkan), without ComfyUI.
+- **New models** on the built-in engine: FLUX.3 Image Klein and Qwen-Image-Edit 2511 with its 4-step Lightning LoRA.
+- **Steadier**: the shrink and drawing threads no longer share buffers; a warning or error shows on a Problem line under
+  the status until clicked; each round keeps what it was drawn with in `NNN\round-R.txt`; the queue stops and says why
+  when an item cannot be drawn; Majority and 2-step vote over the original's colours (no black speckle).
 - Fixed: an item without an enlarged picture no longer points the models at the empty slot; the status line counts
   the whole round after a picture was drawn again.
 
@@ -98,7 +102,7 @@ Everything is one click or one key away:
 | **Ctrl+F** or **/** | the Find box |
 | **Q** / **R** | this item on or off the queue / run the queue |
 | **1** **2** **3** | the right panel: Chosen, Settings, Compare |
-| **F1**, **F2**, ... | the presets, in the order of the bar |
+| **F1** to **F12** | the presets, in the order of the bar |
 | **O** / **M** | the original's colours / the model's own |
 
 No key does anything while a text box or a number is being typed in (but Ctrl+Enter); **Esc** leaves the text box.
@@ -138,7 +142,7 @@ one row (**N more models to get...**). The window comes back where and as big as
 - **< Back / Next >**: earlier rounds; they are kept on disk.
 - **Click a picture**: it is shown large beside the original and the model's own drawing. **Keep this one** writes it
   into every `game =` folder of voxup.ini (a picture already there is backed up first, under `work\backup`); one bigger
-  than `game_max` goes to `work\export`. Every keep is a line in `work\keep.txt`. **Undo the last keep** puts the
+  than `game_max` goes to `work\export`. Every keep is a line in `work\keep.txt`. **Undo the last keep** (until voxup is closed) puts the
   pictures from before back (a kept picture that replaced nothing is moved to `work\backup\STAMP-undone`, not deleted).
   Each picture in a round shows the original small in its corner. **After Keep: the next new item** goes on to the
   next item not kept yet by itself.
@@ -167,6 +171,8 @@ option names), or both. Adding a model is a block in models.txt (and a graph fil
 | kontext | FLUX.1 Kontext dev | 24 | yes | yes |
 | klein4f | FLUX.2 Klein 4B (distilled) | 4 | yes | yes |
 | klein9kv | FLUX.2 Klein 9B KV | 4 | | yes |
+| flux3k | FLUX.3 Image Klein (GGUF Q8) | 8 | yes | |
+| qwen2511g | Qwen-Image-Edit 2511 (GGUF Q4_K_M) + Lightning LoRA | 4 | yes | |
 | qwen2511f | Qwen-Image-Edit 2511 + Lightning | 4 | | yes |
 | qwen2511 | Qwen-Image-Edit 2511 | 40 | | yes |
 | longcat | LongCat-Image-Edit | 50 | | yes |
@@ -215,7 +221,7 @@ In pipeline order (`src/shrink.c`, sources in its header):
   get).
 - `voxup --shrinkcheck DIR`: the pipeline with its standard settings against `--to32` on every drawing in
   `DIR\NNN\*-sSEED.png` (they must be equal).
-- `voxup --selftest SHOT.bmp [ITEM] [--get ID] [--draw ID N ...] [--seeds A,B] [--set key=value] [--tab 1] [--from tool|upright|original] [--keep [--undo]] [--find TEXT] [--redraw N] [--key CODE ...] [--click X,Y[,N]]`:
+- `voxup --selftest SHOT.bmp [ITEM] [--get ID] [--draw ID N ...] [--seeds A,B] [--set key=value] [--tab 0|1|2] [--from tool|upright|original] [--keep [--undo]] [--find TEXT] [--redraw N] [--key CODE ...] [--click X,Y[,N]]`:
   the window off screen, never shown; it can get a model, draw, set shrink settings, press Keep (into
   `work-selftest\selftest-game`) and undo it, use the Find box, throw picture N out, and press keys (Windows key
   codes, e.g. 34 PgDn, 82 R), click the mouse (N: 1 click, 2 double-click, 3 right-click; never into the real game folders), then writes the window's picture.

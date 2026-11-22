@@ -1,8 +1,8 @@
 /* pick.c: voxup's window: an item's sprite redrawn by image models with random seeds, one of them chosen and kept.
    Folders: voxup.ini beside the exe (voxup.ini.example).
 
-     voxup                         the window: load an item, Draw 20 (10 Klein + 10 Kontext, random seeds), New 20 seeds
-                                   as often as wanted, click one, Keep -> NNN.png in voxup.ini's game folders
+     voxup                         the window: load an item, draw a round (the models and counts set in the window, random
+                                   seeds), new seeds as often as wanted, pick one, Keep -> NNN.png in voxup.ini's game folders
      voxup IN.raw OUT.raw ...      the upscaler's command line, as before (voxup.c)
      voxup --to32 DRAWING.png ITEM OUT.png      one drawing to the 32 x 32 sprite (the window's own step; for checks)
      voxup --upright SPRITE.png OUT.png [turn= style= slim= outline= big=]   the sprite stood upright at 32 x 32
@@ -74,7 +74,7 @@ static const char *std_prompt(int kind) { return kind == 1 ? KONTEXT_T : kind ==
 
 /* ---------------------------------------------------------------- small helpers */
 static char WORK[MAX_PATH];                 /* out\pick beside the exe */
-static char MODELS[MAX_PATH];               /* vox\models beside the exe: models.txt and one ComfyUI graph per model */
+static char MODELS[MAX_PATH];               /* voxup.ini models = (else models beside the exe): models.txt and one ComfyUI graph per model */
 
 static void *xmalloc(size_t n) { void *p = malloc(n ? n : 1); if (!p) { vlog(VLOG_ERR, "mem", "out of memory (%u bytes)", (unsigned)n); exit(3); } return p; }
 static int exists(const char *p) { return GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES; }
@@ -531,7 +531,7 @@ static void shotpath(int item, const Shot *s, int small, char *o, int n) {
     snprintf(o, (size_t)n, "%s\\%s-s%u%s.png", d, S.m[s->model].id, s->seed, small == 2 ? "-32u" : small ? "-32" : "");
 }
 
-/* ---------------------------------------------------------------- the models (vox\models\models.txt) */
+/* ---------------------------------------------------------------- the models (models\models.txt) */
 static int find_model(const char *id) { int i; for (i = 0; i < S.nm; i++) if (!strcmp(S.m[i].id, id)) return i; return -1; }
 static void file_path(const MFile *f, char *o, int n) { snprintf(o, (size_t)n, "%s\\%s\\%s", P_SHARED, f->dir, f->name); }
 static int file_there(const MFile *f) {
@@ -1122,7 +1122,7 @@ static int upload_input(int item) {
     free(res.p); S.upitem = item; S.upfrom = S.from;
     return 1;
 }
-/* the model's graph (vox\models\ID.json) with its blanks filled: "@IMAGE@" the uploaded picture, "@PROMPT@" the prompt,
+/* the model's graph (models\ID.json) with its blanks filled: "@IMAGE@" the uploaded picture, "@PROMPT@" the prompt,
    "@SEED@" the seed (a number, so the quotes go too), "@PREFIX@" the output name */
 static void graph(Buf *g, int model, const char *image, const char *prompt, unsigned seed) {
     const char *p = S.m[model].graph, *q; char t[64];
@@ -2295,7 +2295,7 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
             nk_layout_row_static(ctx, 192, 192, 1); if (S.pv_draw) nk_image(ctx, nkimg(S.pv_draw, 192, 192));
             nk_layout_row_dynamic(ctx, 40, 1);
             if (button(ctx, "Keep this one (Enter)", 1, 1)) keep_next();
-            if (S.undo_item >= 0) { nk_layout_row_dynamic(ctx, 28, 1); if (button(ctx, "Undo the last keep (Ctrl+Z)", 0, !busy)) undo_keep(); }
+            if (S.undo_item >= 0) { nk_layout_row_dynamic(ctx, 28, 1); if (button(ctx, "Undo the last keep (Ctrl+Z)", 0, !busy)) undo_keep(); }   /* this session only */
             s_check(ctx, "After Keep: the next new item", &S.auto_next);
         } else {
             nk_label_colored(ctx, "Click a picture to choose it (or the arrow keys).", NK_TEXT_LEFT, DIM);
@@ -2323,6 +2323,7 @@ static LRESULT CALLBACK wndproc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
     if (m == WM_KEYDOWN && wp == VK_RETURN && GetKeyState(VK_CONTROL) < 0) { if (!S.busy) start_round(); return 0; }   /* Ctrl+Enter: draw, even while typing */
     if (m == WM_KEYDOWN && wp == VK_ESCAPE && S.typing) { S.unfocus = 1; return 0; }                 /* Esc: out of the text box */
     if (m == WM_KEYDOWN && !S.typing && hotkey((int)wp)) return 0;
+    if (m == WM_SYSKEYDOWN && wp == VK_F10 && !S.typing && hotkey(VK_F10)) return 0;   /* F10 comes as a system key */
     if (nk_gdi_handle_event(w, m, wp, lp)) return 0;
     return DefWindowProcW(w, m, wp, lp);
 }
@@ -2383,7 +2384,7 @@ static void settings(int save) {
 static int gui(int argc, char **argv) {
     const char *shot = NULL, *test_get = NULL; char *draws[2 * MAXM]; int ndraw = 0, drawn = 0; char *sets[64]; int nsets = 0;
     const char *test_from = NULL;
-    int test_keep = 0, test_undo = 0, test_item = -1, test_redraw = -1, test_keys[8], ntest_keys = 0, test_clk[8][3], ntest_clk = 0; const char *test_find = NULL; int i, k, W = 1440, H = 940, running = 1, refresh = 1, frames = 0;
+    int test_keep = 0, test_undo = 0, test_tab = -1, test_item = -1, test_redraw = -1, test_keys[8], ntest_keys = 0, test_clk[8][3], ntest_clk = 0; const char *test_find = NULL; int i, k, W = 1440, H = 940, running = 1, refresh = 1, frames = 0;
     WNDCLASSW wc; RECT rc; DWORD style = WS_OVERLAPPEDWINDOW; HDC dc; GdiFont *font; struct nk_context *ctx; char p[MAX_PATH], *t;
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION jl;
     if (argc > 1 && !strcmp(argv[1], "--selftest")) {
@@ -2392,7 +2393,7 @@ static int gui(int argc, char **argv) {
             if (!strcmp(argv[i], "--draw")) { while (i + 2 < argc && argv[i + 1][0] != '-' && ndraw < 2 * MAXM - 1) { draws[ndraw++] = argv[i + 1]; draws[ndraw++] = argv[i + 2]; i += 2; } }
             else if (!strcmp(argv[i], "--get") && i + 1 < argc) test_get = argv[++i];   /* Get pressed for that model first */
             else if (!strcmp(argv[i], "--set") && i + 1 < argc && nsets < 64) sets[nsets++] = argv[++i];   /* a shrink setting, key=value */
-            else if (!strcmp(argv[i], "--tab") && i + 1 < argc) S.tab = atoi(argv[++i]);                   /* 1: the settings tab shown */
+            else if (!strcmp(argv[i], "--tab") && i + 1 < argc) test_tab = atoi(argv[++i]);                 /* the right panel shown (0-2), over pick.ini's */
             else if (!strcmp(argv[i], "--from") && i + 1 < argc) test_from = argv[++i];               /* tool, upright or original */
             else if (!strcmp(argv[i], "--keep")) test_keep = 1;     /* Keep pressed too, into out\pick\selftest-game, never the game */
             else if (!strcmp(argv[i], "--undo")) test_undo = 1;     /* and that keep undone again */
@@ -2429,6 +2430,7 @@ static int gui(int argc, char **argv) {
     }
     shrink_defaults(&S.opt);
     settings(0);
+    if (test_tab >= 0 && test_tab <= 2) S.tab = test_tab;
     memset(S.tilt, -1, sizeof S.tilt); S.cmp_for = -1;
     load_presets(); queue_load();
     for (i = 0; i < nsets; i++) { char k[40]; int v; if (sscanf(sets[i], "%39[^=]=%d", k, &v) != 2 || !shrink_set(&S.opt, k, v)) vlog(VLOG_ERR, "selftest", "--set: not a setting: %s", sets[i]); }
