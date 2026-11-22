@@ -2044,6 +2044,12 @@ static int sha256_file(const char *path, char hex[65]) {
     return ok;
 }
 /* one file; 1 = there, 0 = failed (dl_msg says why), -1 = stopped */
+/* the token goes only to Hugging Face: the host is huggingface.co or ends in .huggingface.co, any case (review 3,
+   P2-3: "huggingface.co.example.net" got it before) */
+static int hf_host(const wchar_t *h) {
+    size_t n = wcslen(h), k = wcslen(L".huggingface.co");
+    return !_wcsicmp(h, L"huggingface.co") || (n > k && !_wcsicmp(h + n - k, L".huggingface.co"));
+}
 static int get_file(const MFile *f) {
     static HINTERNET net; wchar_t wu[1024], host[256], path[1024], hdr[100]; URL_COMPONENTS uc; HINTERNET con = NULL, rq = NULL;
     char dst[MAX_PATH], part[MAX_PATH], dir[MAX_PATH]; long long have = 0; DWORD code = 0, sz = sizeof code, got; FILE *o = NULL; int r = 0;
@@ -2057,25 +2063,43 @@ static int get_file(const MFile *f) {
     if (!net) net = WinHttpOpen(L"voxup/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!net) { dl_say("Could not use the internet (WinHTTP): %s", vlog_errno()); return 0; }
     MultiByteToWideChar(CP_UTF8, 0, f->url, -1, wu, 1024);
-    memset(&uc, 0, sizeof uc); uc.dwStructSize = sizeof uc;
-    uc.lpszHostName = host; uc.dwHostNameLength = 256; uc.lpszUrlPath = path; uc.dwUrlPathLength = 1024; uc.dwExtraInfoLength = (DWORD)-1;
-    { wchar_t extra[512]; uc.lpszExtraInfo = extra; uc.dwExtraInfoLength = 512;
-      if (!WinHttpCrackUrl(wu, 0, 0, &uc)) { dl_say("Bad link for %s: %s", f->name, f->url); return 0; }
-      wcsncat(path, extra, 1023 - wcslen(path)); }
-    con = WinHttpConnect(net, host, uc.nPort, 0);
-    if (con) rq = WinHttpOpenRequest(con, L"GET", path, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, uc.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0);
-    if (!rq) { dl_say("Could not reach %ls for %s: %s", host, f->name, vlog_errno()); goto done; }
-    WinHttpSetTimeouts(rq, 30000, 30000, 60000, 120000);
-    {   char tk[256]; int len = 0; wchar_t all[400]; all[0] = 0;
-        if (have) { swprintf(hdr, 100, L"Range: bytes=%lld-\r\n", have); wcscat(all, hdr); }
-        if (wcsstr(host, L"huggingface.co") && hf_token(tk, sizeof tk)) { wchar_t a[300]; swprintf(a, 300, L"Authorization: Bearer %hs\r\n", tk); wcscat(all, a); SecureZeroMemory(a, sizeof a); }
-        SecureZeroMemory(tk, sizeof tk); len = (int)wcslen(all);
-        if (!WinHttpSendRequest(rq, len ? all : WINHTTP_NO_ADDITIONAL_HEADERS, len ? (DWORD)-1L : 0, NULL, 0, 0, 0)) { SecureZeroMemory(all, sizeof all); code = 1; }
-        else SecureZeroMemory(all, sizeof all);
+    {   int hop;    /* redirects followed here, not by WinHTTP: the token is decided again for every host (P2-3) */
+        for (hop = 0; ; hop++) {
+            DWORD pol = WINHTTP_OPTION_REDIRECT_POLICY_NEVER; int tok;
+            memset(&uc, 0, sizeof uc); uc.dwStructSize = sizeof uc;
+            uc.lpszHostName = host; uc.dwHostNameLength = 256; uc.lpszUrlPath = path; uc.dwUrlPathLength = 1024;
+            { wchar_t extra[512]; uc.lpszExtraInfo = extra; uc.dwExtraInfoLength = 512;
+              if (!WinHttpCrackUrl(wu, 0, 0, &uc)) { dl_say("Bad link for %s: %ls", f->name, wu); return 0; }
+              wcsncat(path, extra, 1023 - wcslen(path)); }
+            con = WinHttpConnect(net, host, uc.nPort, 0);
+            if (con) rq = WinHttpOpenRequest(con, L"GET", path, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, uc.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0);
+            if (!rq) { dl_say("Could not reach %ls for %s: %s", host, f->name, vlog_errno()); goto done; }
+            WinHttpSetTimeouts(rq, 30000, 30000, 60000, 120000);
+            WinHttpSetOption(rq, WINHTTP_OPTION_REDIRECT_POLICY, &pol, sizeof pol);
+            tok = hf_host(host);
+            {   char tk[256]; int len = 0; wchar_t all[400]; all[0] = 0; code = 0;
+                if (have) { swprintf(hdr, 100, L"Range: bytes=%lld-\r\n", have); wcscat(all, hdr); }
+                if (tok && hf_token(tk, sizeof tk)) { wchar_t a[300]; swprintf(a, 300, L"Authorization: Bearer %hs\r\n", tk); wcscat(all, a); SecureZeroMemory(a, sizeof a); }
+                SecureZeroMemory(tk, sizeof tk); len = (int)wcslen(all);
+                if (!WinHttpSendRequest(rq, len ? all : WINHTTP_NO_ADDITIONAL_HEADERS, len ? (DWORD)-1L : 0, NULL, 0, 0, 0)) code = 1;
+                SecureZeroMemory(all, sizeof all);
+            }
+            if (code == 1 || !WinHttpReceiveResponse(rq, NULL)) {
+                dl_say("No answer for %s (%s): try Get again", f->name, vlog_errno()); goto done; }
+            sz = sizeof code;
+            WinHttpQueryHeaders(rq, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &code, &sz, WINHTTP_NO_HEADER_INDEX);
+            if (code != 301 && code != 302 && code != 303 && code != 307 && code != 308) break;
+            {   wchar_t loc[1024]; DWORD ls = sizeof loc;
+                if (hop >= 8 || !WinHttpQueryHeaders(rq, WINHTTP_QUERY_LOCATION, WINHTTP_HEADER_NAME_BY_INDEX, loc, &ls, WINHTTP_NO_HEADER_INDEX)) {
+                    dl_say("%s: too many redirects, or one with no address (HTTP %lu)", f->name, code); goto done; }
+                if (loc[0] == L'/') { wchar_t b[1024]; swprintf(b, 1024, L"%ls://%ls:%u%ls", uc.nScheme == INTERNET_SCHEME_HTTPS ? L"https" : L"http", host, (unsigned)uc.nPort, loc); wcsncpy(wu, b, 1023); }
+                else wcsncpy(wu, loc, 1023);
+                wu[1023] = 0;
+                vlog(VLOG_INFO, "get", "%s: redirected (HTTP %lu) to %ls", f->name, code, wu);
+            }
+            WinHttpCloseHandle(rq); rq = NULL; WinHttpCloseHandle(con); con = NULL;
+        }
     }
-    if (code == 1 || !WinHttpReceiveResponse(rq, NULL)) {
-        dl_say("No answer for %s (%s): try Get again", f->name, vlog_errno()); goto done; }
-    WinHttpQueryHeaders(rq, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &code, &sz, WINHTTP_NO_HEADER_INDEX);
     if (code == 401 || code == 403) { S.need_token = 1;
         dl_say("This model needs a free Hugging Face login: make one at https://huggingface.co/join, accept the model's terms on its page, then paste a read token below (%s, HTTP %lu).", f->name, code); goto done; }
     if (code == 416 && have > 0) {      /* the server has nothing past the part: it is whole only if it is the file's size */
@@ -2123,6 +2147,7 @@ done:
 static DWORD WINAPI dl_worker(LPVOID arg) {
     int m = S.dl_model, i, r = 1; Model *M = &S.m[m]; ULARGE_INTEGER fr;
     (void)arg;
+    mkdirs(P_SHARED);       /* else the first Get's check finds no folder and is skipped (review 3, P3-5) */
     if (GetDiskFreeSpaceExA(P_SHARED, &fr, NULL, NULL) && (long long)fr.QuadPart < S.dl_total + 2000000000LL)
         { dl_say("Not enough room for %s: it needs %.1f GB, %.1f GB are free (2 GB kept spare)", M->name, gb(S.dl_total), gb((long long)fr.QuadPart)); r = 0; }
     for (i = 0; r == 1 && i < M->nf; i++) {
@@ -2633,10 +2658,21 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
             static char stars[256]; size_t ol = strlen(S.tok), nl; static const int TW[] = { 0, 70 };
             memset(stars, '*', ol); stars[ol] = 0;
             nk_ext_row(ctx, 24, 2, TW);
-            nk_edit_string_zero_terminated(ctx, NK_EDIT_FIELD, stars, sizeof stars, nk_filter_default);
+            {   static int tok_active; struct nk_window *w = ctx->current; nk_flags ef;
+                if (tok_active && w) { int e = (int)strlen(stars); w->edit.cursor = w->edit.sel_start = w->edit.sel_end = e; }
+                ef = nk_edit_string_zero_terminated(ctx, NK_EDIT_FIELD, stars, sizeof stars, nk_filter_default);
+                tok_active = (ef & NK_EDIT_ACTIVE) != 0; }
             nl = strlen(stars);
-            if (nl > ol) { size_t j; for (j = ol; j < nl && j < sizeof S.tok - 1; j++) S.tok[j] = stars[j]; S.tok[nl < sizeof S.tok ? nl : sizeof S.tok - 1] = 0; }
-            else if (nl < ol) S.tok[nl] = 0;
+            if (nl != ol || strspn(stars, "*") != nl) {    /* rebuilt from the box: a * is the old letter in its turn (review 3, P3-4) */
+                char t[256]; size_t j, k = 0, ns = 0, q = 0;
+                for (j = 0; j < nl; j++) ns += stars[j] == '*';
+                if (ns == ol || (ns < ol && strspn(stars, "*") == nl && nl == ns)) {   /* letters put in anywhere; or cut off at the end */
+                    for (j = 0; j < nl && q < sizeof t - 1; j++) t[q++] = stars[j] == '*' ? S.tok[k++] : stars[j];
+                    t[q] = 0; snprintf(S.tok, sizeof S.tok, "%s", t);
+                } else if (!ns) snprintf(S.tok, sizeof S.tok, "%s", stars);      /* all replaced (a paste over all) */
+                else { S.tok[0] = 0; dl_say("Part of the token was changed in the middle: type or paste the whole token again."); }
+                SecureZeroMemory(t, sizeof t);
+            }
             SecureZeroMemory(stars, sizeof stars);
             if (button(ctx, "Keep it", 1, S.tok[0] != 0)) { if (hf_token_save(S.tok)) { S.need_token = 0; dl_say("Token kept in Windows' Credential Manager: press Get again."); } SecureZeroMemory(S.tok, sizeof S.tok); }
         }
@@ -3072,6 +3108,9 @@ static int gui(int argc, char **argv) {
             else if (!strcmp(argv[i], "--novulkan")) TEST_NOVK = 1;      /* acts as if vulkan-1.dll were missing */
 #endif
             else if (!strcmp(argv[i], "--contrast")) test_contrast = 1;
+            else if (!strcmp(argv[i], "--hostcheck")) {   /* which hosts would get the Hugging Face token */
+                static const wchar_t *H[] = { L"huggingface.co", L"HuggingFace.CO", L"cdn-lfs.huggingface.co", L"huggingface.co.example.net", L"xhuggingface.co", L"example.com", L"127.0.0.1" }; int h;
+                for (h = 0; h < 7; h++) vlog(VLOG_INFO, "hostcheck", "%-28ls %s", H[h], hf_host(H[h]) ? "gets the token" : "no token"); return 0; }
             else if (!strcmp(argv[i], "--dpi") && i + 1 < argc) test_dpi = atoi(argv[++i]);     /* the window drawn as on a monitor of that DPI (96, 144, 192) */
             else if (!strcmp(argv[i], "--fold") && i + 1 < argc) test_fold = argv[++i];   /* L,R: 1 folds that side (over pick.ini's) */     /* each text colour against its ground, in the log */
             else if (!strcmp(argv[i], "--accept-licence")) test_accept = 1;     /* Accept and get, when the licence is asked */
