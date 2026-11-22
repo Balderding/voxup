@@ -11,8 +11,8 @@ if defined LLVM_ENV call "%LLVM_ENV%"
 cd /d "%~dp0src"
 if not exist ..\obj mkdir ..\obj
 set W=-O2 -Wall -Wextra -Wno-missing-field-initializers -Wno-unused-function -Wno-c23-extensions
-rem the third-party code once, without our warnings (it only changes with third_party\VERSIONS.txt)
-if not exist ..\obj\nk_impl.o clang %CLANG_FLAGS% -O2 -w -c -o ..\obj\nk_impl.o nk_impl.c || exit /b 1
+rem the third-party code, without our warnings: every build (nuklear_gdi.h carries voxup's marked patches)
+clang %CLANG_FLAGS% -O2 -w -c -o ..\obj\nk_impl.o nk_impl.c || exit /b 1
 if /i not "%1"=="sd" (
   clang %CLANG_FLAGS% %W% -mwindows -static -o ..\voxup.exe pick.c shrink.c upright.c voxup.c vlog.c embed.c nk_ext.c ..\obj\nk_impl.o -lwinhttp -lbcrypt -lgdi32 -luser32 -lmsimg32 -lshell32 -lole32 -lcomdlg32 -lkernel32 -lm || exit /b 1
   echo built voxup.exe
