@@ -297,17 +297,10 @@ int upright_measure(const unsigned char *rgba, int w, int h, double *tilt, doubl
     *tilt = t;
     return 1;
 }
-static int outlined(const unsigned char *rgba, int w, int h) {
-    Img a = { w, h, (unsigned char *)rgba }; unsigned char *blk = mask(&a, M_BLK), *col = mask(&a, M_COL), *bg = mask(&a, M_BG);
-    int x, y, nb = 0, nc = 0, exp = 0, fen = 0, r;
-    for (y = 0; y < h; y++) for (x = 0; x < w; x++) {
-        if (col[y * w + x]) { nc++; if (near(bg, w, h, x, y, 0)) exp++; }
-        if (blk[y * w + x]) { nb++; if (near(col, w, h, x, y, 1)) fen++; }
-    }
-    r = nb > 0 && (double)exp / (nc > 1 ? nc : 1) < 0.15 && (double)fen / (nb > 1 ? nb : 1) > 0.9;
-    free(blk); free(col); free(bg);
-    return r;
-}
+/* the original has a black outline: shrink.c's orig_outlined, the one rule for both (review A17; this file had the
+   same rule written out again with its masks) */
+int orig_outlined(const unsigned char *rgba, int w, int h);
+static int outlined(const unsigned char *rgba, int w, int h) { return orig_outlined(rgba, w, h); }
 static int top_row(const Img *o) { int x, n = 0; for (x = 0; x < o->w; x++) n += OP(o, x, 0); return n; }
 
 int upright_make(const unsigned char *rgba, int w, int h, const UprightOpt *o, unsigned char *out32, double *turn_used, double *scale_used) {

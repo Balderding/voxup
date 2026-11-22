@@ -338,7 +338,7 @@ static int shrink_cli(int argc, char **argv) {
 static int upright_set(UprightOpt *o, const char *kv) {
     char k[16], v[24];
     if (sscanf(kv, "%15[^=]=%23s", k, v) != 2) return 0;
-    if (!strcmp(k, "turn")) { if (!strcmp(v, "auto")) o->auto_turn = 1; else { o->auto_turn = 0; o->turn = atof(v); } }
+    if (!strcmp(k, "turn")) { if (!strcmp(v, "auto") || !strcmp(v, "force")) o->auto_turn = 1; else { o->auto_turn = 0; o->turn = atof(v); } }
     else if (!strcmp(k, "style")) o->centred = !strcmp(v, "centred");
     else if (!strcmp(k, "slim")) o->slim = !strcmp(v, "sword") ? UP_SLIM_SWORD : !strcmp(v, "shaft") ? UP_SLIM_SHAFT : UP_SLIM_OFF;
     else if (!strcmp(k, "outline")) o->outline = !strcmp(v, "on") ? 1 : !strcmp(v, "off") ? 0 : -1;
@@ -349,13 +349,19 @@ static int upright_set(UprightOpt *o, const char *kv) {
    32 x 32 (with big=PX: the large clean picture the models get instead) */
 static int upright_cli(int argc, char **argv) {
     UprightOpt o; int w, h, i, big = 0, ok; unsigned char *d, out[32 * 32 * 4]; double turn = 0, scale = 0;
-    if (argc < 4) { fprintf(stderr, "voxup --upright SPRITE.png OUT.png [turn=auto|DEG] [style=classic|centred] [slim=off|sword|shaft] [outline=auto|on|off] [big=PX]\n"); return 255; }
+    if (argc < 4) { fprintf(stderr, "voxup --upright SPRITE.png OUT.png [turn=auto|force|DEG] [style=classic|centred] [slim=off|sword|shaft] [outline=auto|on|off] [big=PX]\n"); return 255; }
     upright_defaults(&o);
     for (i = 4; i < argc; i++) {
         if (!strncmp(argv[i], "big=", 4)) big = atoi(argv[i] + 4);
         else if (!upright_set(&o, argv[i])) { vlog(VLOG_ERR, "upright", "not a setting: %s", argv[i]); return 255; }
     }
     if (!(d = load_rgba(argv[2], &w, &h))) return 1;
+    {   int force = 0; for (i = 4; i < argc; i++) force |= !strcmp(argv[i], "turn=force");
+        if (o.auto_turn && !force) {     /* auto: as the window does, only an item that lies tilted (A17) */
+            double t, el; int tl = 0;
+            if (!upright_measure(d, w, h, &t, &el, &tl) || !tl) { printf("not tilted (long axis %.1f degrees off level): not turned; turn=force turns it anyway\n", t); stbi_image_free(d); return 0; }
+        }
+    }
     if (big > 0) {
         int bw, bh; unsigned char *b;
         if (o.auto_turn) { double t, el; int tl; upright_measure(d, w, h, &t, &el, &tl); o.turn = -t; }
@@ -616,7 +622,7 @@ static struct {
     int queue[512], nq, qrun;                   /* items to draw a round of, in turn (work\queue.txt) */
     int own_opt; ShrinkOpt gopt; int opt_loaded; /* the item has its own settings (NNN\shrink.txt); everyone else's */
     char pname[16][32], pset[16][400]; int np, nbuiltin; char newpreset[32]; unsigned char phid[16];   /* phid: a Compare-only preset (not on the bar, no F key) */
-    int cmp_for; LONG cmp_gen; HBITMAP cmp_bm[17]; int cmp_w[17], cmp_h[17]; char cmp_score[17][64];
+    int cmp_for; LONG cmp_gen; HBITMAP cmp_bm[17], cmp_bm1[17]; int cmp_w[17], cmp_h[17], cmp_w1[17], cmp_h1[17];   /* ...; bm1: the same at 1x (A17) */ char cmp_score[17][64];
     volatile LONG sd_step, sd_steps; DWORD draw_t0; DWORD avg_ms[MAXM]; int nkeeps;
     int show_get, nget, unfocus; WINDOWPLACEMENT wp; int have_wp;   /* models to get shown; Esc in a text box; the window's place */
     /* the side panels' widths: wanted (pick.ini split=), shown; a divider dragged; the grid's columns; the panels'
@@ -1594,7 +1600,8 @@ static void round_desc(int item, int round, char *d, int n) {
 }
 static void start_round(void) {
     Round *R; int i, m; HANDLE th; char d[64];
-    if (S.busy || S.nr >= MAXR || round_size() < 1) return;
+    if (S.busy || round_size() < 1) return;
+    if (S.nr >= MAXR) { status("%03d has %d rounds, the most one item can keep: no new round (A17).", S.item, MAXR); return; }
     if (round_size() > MAXSHOT) { status("At most %d pictures a round: set fewer.", MAXSHOT); return; }
     unwrap(S.descbuf, d, sizeof d);
     if (!d[0]) { status("Write what the item is first (the box under the pictures)."); return; }
@@ -1878,7 +1885,7 @@ static void compare_make(Shot *s) {
        (both bump S.optgen): the colours, fit and upright box are part of every picture (review A9) */
     LONG key = (LONG)(S.item * 100000 + S.cur * 100 + S.sel), gen = S.optgen * 64 + S.np;
     if (S.cmp_for == key && S.cmp_gen == gen) return;
-    for (i = 0; i < 17; i++) { if (S.cmp_bm[i]) DeleteObject(S.cmp_bm[i]); S.cmp_bm[i] = NULL; S.cmp_score[i][0] = 0; }
+    for (i = 0; i < 17; i++) { if (S.cmp_bm[i]) DeleteObject(S.cmp_bm[i]); if (S.cmp_bm1[i]) DeleteObject(S.cmp_bm1[i]); S.cmp_bm[i] = S.cmp_bm1[i] = NULL; S.cmp_score[i][0] = 0; }
     S.cmp_for = key; S.cmp_gen = gen;
     shotpath(S.item, s, 0, p, sizeof p);
     if (!(d = stbi_load(p, &dw, &dh, &nn, 3))) { vlog(VLOG_WARN, "compare", "no drawing %s", p); return; }
@@ -1888,6 +1895,7 @@ static void compare_make(Shot *s) {
         if (!shrink(d, dw, dh, fitpic(s->src), 16, 16, &o, out)) continue;
         z = 96 / (W > H ? W : H); if (z < 1) z = 1;
         S.cmp_bm[i] = mkbmp(out, W, H, z, 0); S.cmp_w[i] = W * z; S.cmp_h[i] = H * z;
+        S.cmp_bm1[i] = mkbmp(out, W, H, 1, 0); S.cmp_w1[i] = W; S.cmp_h1[i] = H;     /* as small as in the game */
         if (s->src == FROM_UP && S.has_up) score_sprite(out, W, H, S.up, 32, S.cmp_score[i], sizeof S.cmp_score[i]);
         else score_sprite(out, W, H, S.orig, 16, S.cmp_score[i], sizeof S.cmp_score[i]);
     }
@@ -2344,12 +2352,15 @@ static void compare_panel(struct nk_context *ctx, Shot *s) {
             if (j >= S.np) break;          /* not nk_spacing: filling the row with it starts an empty one */
             ws = nk_widget(&b, ctx); if (ws == NK_WIDGET_INVALID) continue;
             cv = nk_window_get_canvas(ctx);
-            nk_fill_rect(cv, nk_rect(b.x + 30, b.y, 96, 96), 0, nk_rgb(64, 68, 77));
+            nk_fill_rect(cv, nk_rect(b.x + 38, b.y, 96, 96), 0, nk_rgb(64, 68, 77));
             if (S.cmp_bm[j]) { struct nk_image im = nkimg(S.cmp_bm[j], S.cmp_w[j], S.cmp_h[j]);
-                nk_draw_image(cv, nk_rect(b.x + 30 + (96 - S.cmp_w[j]) / 2, b.y + (96 - S.cmp_h[j]) / 2, (float)S.cmp_w[j], (float)S.cmp_h[j]), &im, nk_rgb(255, 255, 255)); }
+                nk_draw_image(cv, nk_rect(b.x + 38 + (96 - S.cmp_w[j]) / 2, b.y + (96 - S.cmp_h[j]) / 2, (float)S.cmp_w[j], (float)S.cmp_h[j]), &im, nk_rgb(255, 255, 255)); }
+            if (S.cmp_bm1[j]) { struct nk_image im = nkimg(S.cmp_bm1[j], S.cmp_w1[j], S.cmp_h1[j]);     /* 1x, top left */
+                nk_fill_rect(cv, nk_rect(b.x + 1, b.y, (float)S.cmp_w1[j] + 2, (float)S.cmp_h1[j] + 2), 0, nk_rgb(64, 68, 77));
+                nk_draw_image(cv, nk_rect(b.x + 2, b.y + 1, (float)S.cmp_w1[j], (float)S.cmp_h1[j]), &im, nk_rgb(255, 255, 255)); }
             nk_draw_text(cv, nk_rect(b.x, b.y + 97, 156, 16), S.pname[j], (int)strlen(S.pname[j]), f, nk_rgb(45, 45, 45), j == now ? TEALT : GOLD);
             nk_draw_text(cv, nk_rect(b.x, b.y + 113, 156, 16), S.cmp_score[j], (int)strlen(S.cmp_score[j]), f, nk_rgb(45, 45, 45), DIM);
-            if (j == now) nk_stroke_rect(cv, nk_rect(b.x + 28, b.y - 2, 100, 100), 0, 2, TEAL2);
+            if (j == now) nk_stroke_rect(cv, nk_rect(b.x + 36, b.y - 2, 100, 100), 0, 2, TEAL2);
             if (nk_input_is_mouse_hovering_rect(&ctx->input, b)) nk_ext_tooltip(ctx, S.cmp_score[j]);
             if (ws == NK_WIDGET_VALID && nk_input_is_mouse_click_down_in_rect(&ctx->input, NK_BUTTON_LEFT, b, nk_true)) { preset_apply_to(&S.opt, j); status("Preset: %s", S.pname[j]); }
         }
