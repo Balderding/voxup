@@ -945,7 +945,7 @@ static void choose(int pos) {
     snprintf(p, sizeof p, "%s\\%03d.png", P_SPRITES, item);
     if ((d = load_rgba(p, &w, &h))) { if (w == 16 && h == 16) { memcpy(S.orig, d, sizeof S.orig); S.bm_orig = mkbmp(S.orig, 16, 16, 6, 0); S.pv_orig = mkbmp(S.orig, 16, 16, 12, 0); S.bm_mini = mkbmp(S.orig, 16, 16, 2, 0); } stbi_image_free(d); }
     snprintf(p, sizeof p, "%s\\%03d.png", P_ENLARGED, item);
-    if ((d = load_rgba(p, &w, &h))) { if (w == 32 && h == 32) { memcpy(S.tool, d, sizeof S.tool); S.bm_tool = mkbmp(S.tool, 32, 32, 3, 0); } stbi_image_free(d); }
+    if (P_ENLARGED[0] && (d = load_rgba(p, &w, &h))) { if (w == 32 && h == 32) { memcpy(S.tool, d, sizeof S.tool); S.bm_tool = mkbmp(S.tool, 32, 32, 3, 0); } stbi_image_free(d); }
     load_upright(item, 0);
     if (S.has_up) { S.bm_up = mkbmp(S.up, 32, 32, 3, 0); S.pv_up = mkbmp(S.up, 32, 32, 6, 0); }
     /* what the models are given: from.txt, else the upright picture when there is one, else our tool's */
@@ -1203,7 +1203,9 @@ static void draw_one(int item, int round, Shot *s, const char *desc, const char 
 }
 #if SD_BUILT
 /* ---------------------------------------------------------------- the built-in engine (stable-diffusion.cpp) */
-static sd_ctx_t *SDX; static int SDX_MODEL = -1;      /* the loaded model, kept between rounds; only the worker uses it */
+/* SDX: the loaded model, kept between rounds; only the worker uses it. SDX_FAILED: a model that would not load this
+   round (not tried again until the next round) */
+static sd_ctx_t *SDX; static int SDX_MODEL = -1, SDX_FAILED = -1;
 static volatile LONG SDX_DRAWING;
 static void sd_log(enum sd_log_level_t lv, const char *t, void *data) {
     char b[600]; size_t n; (void)data;
@@ -1232,6 +1234,7 @@ static void sd_unload(void) { if (SDX) { sd_ctx_free(SDX); SDX = NULL; SDX_MODEL
 static int sd_load(int model) {
     Model *M = &S.m[model]; sd_ctx_opt_t *o; int i; char v[MAX_PATH + 600]; sd_status_t st;
     if (SDX && SDX_MODEL == model) return 1;
+    if (SDX_FAILED == model) return 0;
     sd_unload();
     if (!(o = sd_ctx_opt_create())) return 0;
     for (i = 0; i < M->nsd; i++) if (M->sd[i].where == 'c') {
@@ -1240,7 +1243,7 @@ static int sd_load(int model) {
     }
     status("Loading %s into the built-in engine...", M->name);
     st = sd_ctx_create(o, &SDX); sd_opt_free(o);
-    if (st != SD_STATUS_OK || !SDX) { status("The built-in engine could not load %s: %s", M->name, sd_get_last_error()); vlog(VLOG_ERR, "engine", "%s: load failed (%d): %s", M->id, (int)st, sd_get_last_error()); SDX = NULL; return 0; }
+    if (st != SD_STATUS_OK || !SDX) { status("The built-in engine could not load %s: %s", M->name, sd_get_last_error()); vlog(VLOG_ERR, "engine", "%s: load failed (%d): %s", M->id, (int)st, sd_get_last_error()); SDX = NULL; SDX_FAILED = model; return 0; }
     SDX_MODEL = model; vlog(VLOG_INFO, "engine", "loaded %s (%s)", M->id, sd_get_model_version_name(SDX));
     return 1;
 }
@@ -1309,6 +1312,9 @@ static DWORD WINAPI worker(LPVOID arg) {
     {   /* ComfyUI made ready when a shot first needs it; the item's picture made once for the built-in engine. The
            round is gone through until no shot waits: one thrown out (right-click) while drawing is drawn again too */
         int comfy_ok = -1, last_model = -1; unsigned char *pic = NULL, pic_fail = 0, freed = 0;
+#if SD_BUILT
+        SDX_FAILED = -1;      /* a model that failed last round may load now (its files may have been got since) */
+#endif
         for (;;) {
             Shot *s = NULL; int sd; DWORD t1;
             for (i = 0; i < R->n; i++) if (R->s[i].st == ST_WAIT) { s = &R->s[i]; break; }

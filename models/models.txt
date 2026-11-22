@@ -72,6 +72,39 @@ file diffusion_models flux-2-klein-9b-kv-fp8.safetensors 9818935984 https://hugg
 file text_encoders qwen_3_8b_fp8mixed.safetensors 8664848742 https://huggingface.co/Comfy-Org/flux2-klein-9B/resolve/main/split_files/text_encoders/qwen_3_8b_fp8mixed.safetensors
 file vae flux2-vae.safetensors 336213556 https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors
 
+model flux3k
+name FLUX 3 Klein
+note FLUX.3 Image Klein (Black Forest Labs, Oct 2026), the successor of Klein; GGUF Q8, built-in engine. Licence: FLUX Kommunity (free under US$5M revenue).
+prompt draw
+file diffusion_models flux-3-image-klein-Q8_0.gguf 6092755872 https://huggingface.co/unsloth/flux-3-image-klein-GGUF/resolve/main/flux-3-image-klein-Q8_0.gguf
+file text_encoders qwen3vl_4b_bf16.safetensors 8875719384 https://huggingface.co/Comfy-Org/Mage-Flow/resolve/main/text_encoders/qwen3vl_4b_bf16.safetensors
+file vae flux2-vae.safetensors 336213556 https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors
+sd ctx diffusion_model_path files:diffusion_models/flux-3-image-klein-Q8_0.gguf
+sd ctx llm_path files:text_encoders/qwen3vl_4b_bf16.safetensors
+sd ctx vae_path files:vae/flux2-vae.safetensors
+sd image ref
+sd img sample.steps 8
+sd img sample.method euler
+sd img sample.guidance.txt_cfg 1.0
+
+model qwen2511g
+name Qwen Edit Q4 fast
+note Qwen-Image-Edit 2511 (Alibaba, Apache 2.0), GGUF Q4_K_M with the Lightning 4-step LoRA; built-in engine. Best at keeping the exact shape.
+prompt edit
+file diffusion_models qwen-image-edit-2511-Q4_K_M.gguf 12842830432 https://huggingface.co/unsloth/Qwen-Image-Edit-2511-GGUF/resolve/main/qwen-image-edit-2511-Q4_K_M.gguf
+file loras Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors 849608296 https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning/resolve/main/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors
+file text_encoders qwen_2.5_vl_7b_fp8_scaled.safetensors 9384670680 https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors
+file vae qwen_image_vae.safetensors 253806246 https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/vae/qwen_image_vae.safetensors
+sd ctx diffusion_model_path files:diffusion_models/qwen-image-edit-2511-Q4_K_M.gguf
+sd ctx llm_path files:text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors
+sd ctx vae_path files:vae/qwen_image_vae.safetensors
+sd image ref
+sd lora loras Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors 100
+sd img sample.steps 4
+sd img sample.method euler
+sd img sample.guidance.txt_cfg 1.0
+sd img sample.flow_shift 3.0
+
 model qwen2511f
 name Qwen Edit fast
 note Qwen-Image-Edit 2511 with the Lightning add-on: a big 20B editor in 4 steps.
