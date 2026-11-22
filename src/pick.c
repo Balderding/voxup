@@ -1662,7 +1662,11 @@ static void score_sprite(const unsigned char *spr, int W, int H, const unsigned 
           for (j = 0; j < 4; j++) { int u = x + dx[j], v = y + dy[j]; const unsigned char *r; if (u < 0 || v < 0 || u >= W || v >= H) continue; r = spr + ((size_t)v * W + u) * 4; if (r[3] >= 128 && r[0] == q[0] && r[1] == q[1] && r[2] == q[2]) same = 1; }
           lone += !same; }
     }
-    snprintf(o, (size_t)n, "fit %d%%  col %d  lone %d", any ? both * 100 / any : 0, cnt ? (int)(cerr / cnt + 0.5) : 0, lone);
+    {   /* col only when the colours are not the original's own (then it is always 0); lone per 100 pixels (review A13) */
+        int col = cnt ? (int)(cerr / cnt + 0.5) : 0, lp = cnt ? (lone * 100 + cnt / 2) / cnt : 0, fit = any ? both * 100 / any : 0;
+        if (col) snprintf(o, (size_t)n, "fit %d%%  col %d  lone %d%%", fit, col, lp);
+        else snprintf(o, (size_t)n, "fit %d%%  lone %d%%", fit, lp);
+    }
 }
 static void compare_make(Shot *s) {
     char p[MAX_PATH]; int dw, dh, nn, i, W, H, z; unsigned char *d; static unsigned char out[128 * 128 * 4];
@@ -1939,7 +1943,7 @@ static void settings_panel(struct nk_context *ctx) {
     s_combo(ctx, "Its line", LINE, 2, &line);
     if (line == 1) o->peel = 0; else { if (!o->peel) o->peel = 4; s_int(ctx, "Layers taken off", &o->peel, 1, 4, 1); }
     s_head(ctx, "Clean-up");
-    s_check(ctx, "Lone pixels: neighbours. colour", &o->orphans);
+    s_check(ctx, "Lone pixels take their neighbours' colour", &o->orphans);
     s_check(ctx, "Doubled corners in lines off", &o->jaggies);
     s_head(ctx, "Outline");
     s_combo(ctx, "Outline", OUTL, 5, &o->outline);
@@ -1995,7 +1999,7 @@ static void compare_panel(struct nk_context *ctx, Shot *s) {
         }
     }
     nk_layout_row_dynamic(ctx, 50, 1);
-    nk_label_colored_wrap(ctx, "fit: how much the sprite and the original's (or the upright picture's) shape cover each other. col: how far its colours are from the original's (0 = all its own). lone: single pixels of a colour.", DIM);
+    nk_label_colored_wrap(ctx, "fit: how much the sprite and the original's (or the upright picture's) shape cover each other. col (only when the colours are not the original's): how far they are from the original's. lone: the share of single pixels of a colour.", DIM);
 }
 static int gui_frame(struct nk_context *ctx, int W, int H) {
     char lab[700]; int i, busy = S.busy != 0;
@@ -2049,7 +2053,7 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
         /* the three before pictures (the original, our tool's enlarged one, the upright one): a click on one = the
            models draw from it (framed) */
         nk_layout_row_dynamic(ctx, 18, 1); nk_label_colored(ctx, "Draw from: click a picture (framed)", NK_TEXT_LEFT, GOLD);
-        nk_layout_row_static(ctx, 18, 100, 3); nk_label_colored(ctx, "Original 16", NK_TEXT_LEFT, DIM); nk_label_colored(ctx, "Our tool 32", NK_TEXT_LEFT, DIM); nk_label_colored(ctx, "Upright 32", NK_TEXT_LEFT, DIM);
+        nk_layout_row_static(ctx, 18, 100, 3); nk_label_colored(ctx, "Original 16", NK_TEXT_LEFT, DIM); nk_label_colored(ctx, "Enlarged 32", NK_TEXT_LEFT, DIM); nk_label_colored(ctx, "Upright 32", NK_TEXT_LEFT, DIM);
         nk_layout_row_static(ctx, 100, 100, 3);
         {   static const int FR[3] = { FROM_ORIG, FROM_TOOL, FROM_UP }; HBITMAP bm[3]; int c, pick = -1;
             bm[0] = S.bm_orig; bm[1] = S.bm_tool; bm[2] = S.bm_up;
@@ -2319,7 +2323,12 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
 static LRESULT CALLBACK wndproc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
     if (m == WM_DESTROY) { S.wp.length = sizeof S.wp; S.have_wp = GetWindowPlacement(w, &S.wp) != 0; PostQuitMessage(0); return 0; }
     if (m == WM_APP) return 0;
-    if (m == WM_CLOSE && S.busy) { InterlockedExchange(&S.stop, 1); }
+    if (m == WM_CLOSE && S.busy) {
+        InterlockedExchange(&S.stop, 1);
+#if SD_BUILT
+        if (SDX_DRAWING && SDX) sd_cancel_generation(SDX, SD_CANCEL_ALL);     /* not a 10 s wait for the picture (review A16) */
+#endif
+    }
     if (m == WM_KEYDOWN && wp == VK_RETURN && GetKeyState(VK_CONTROL) < 0) { if (!S.busy) start_round(); return 0; }   /* Ctrl+Enter: draw, even while typing */
     if (m == WM_KEYDOWN && wp == VK_ESCAPE && S.typing) { S.unfocus = 1; return 0; }                 /* Esc: out of the text box */
     if (m == WM_KEYDOWN && !S.typing && hotkey((int)wp)) return 0;
@@ -2464,7 +2473,7 @@ static int gui(int argc, char **argv) {
     if (shot) {   /* a self-test never keeps into the real game folders (a test click or key can keep too) */
         static char g0[MAX_PATH], g1[MAX_PATH];
         snprintf(g0, sizeof g0, "%s\\selftest-game\\data", WORK); snprintf(g1, sizeof g1, "%s\\selftest-game\\dist", WORK);
-        GAMEDIRS[0] = g0; GAMEDIRS[1] = g1; N_GAME = 2;
+        GAMEDIRS[0] = g0; GAMEDIRS[1] = g1; N_GAME = 2; snprintf(GAMETAG[0], 16, "data"); snprintf(GAMETAG[1], 16, "dist");
     }
     choose(S.pos);
     if (test_from) { int f; for (f = 0; f < 3; f++) if (!strcmp(test_from, FROM_NAMES[f]) && (f != FROM_UP || S.has_up)) { S.from = f; load_desc_text(S.item); } }
@@ -2510,7 +2519,7 @@ static int gui(int argc, char **argv) {
             if (test_keep && S.sel >= 0) {
                 static char g0[MAX_PATH], g1[MAX_PATH];
                 snprintf(g0, sizeof g0, "%s\\selftest-game\\data", WORK); snprintf(g1, sizeof g1, "%s\\selftest-game\\dist", WORK);
-                GAMEDIRS[0] = g0; GAMEDIRS[1] = g1; N_GAME = 2; keep(); if (test_undo) undo_keep(); test_keep = 0; continue;
+                GAMEDIRS[0] = g0; GAMEDIRS[1] = g1; N_GAME = 2; snprintf(GAMETAG[0], 16, "data"); snprintf(GAMETAG[1], 16, "dist"); keep(); if (test_undo) undo_keep(); test_keep = 0; continue;
             }
             if (frames > 6) { save_bmp(shot, W, H); vlog(VLOG_INFO, "selftest", "wrote %s", shot); break; }
         }
