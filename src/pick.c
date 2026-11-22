@@ -1660,10 +1660,12 @@ static void score_sprite(const unsigned char *spr, int W, int H, const unsigned 
 }
 static void compare_make(Shot *s) {
     char p[MAX_PATH]; int dw, dh, nn, i, W, H, z; unsigned char *d; static unsigned char out[128 * 128 * 4];
-    LONG key = (LONG)(S.cur * 100 + S.sel);
-    if (S.cmp_for == key && S.cmp_gen == S.np * 1000 + (S.opt.size * 300 + S.opt.cw * 3 + S.opt.ch)) return;
+    /* made again for another item, round, picture or preset list, and after any setting change or upright Remake
+       (both bump S.optgen): the colours, fit and upright box are part of every picture (review A9) */
+    LONG key = (LONG)(S.item * 100000 + S.cur * 100 + S.sel), gen = S.optgen * 64 + S.np;
+    if (S.cmp_for == key && S.cmp_gen == gen) return;
     for (i = 0; i < 17; i++) { if (S.cmp_bm[i]) DeleteObject(S.cmp_bm[i]); S.cmp_bm[i] = NULL; S.cmp_score[i][0] = 0; }
-    S.cmp_for = key; S.cmp_gen = S.np * 1000 + (S.opt.size * 300 + S.opt.cw * 3 + S.opt.ch);
+    S.cmp_for = key; S.cmp_gen = gen;
     shotpath(S.item, s, 0, p, sizeof p);
     if (!(d = stbi_load(p, &dw, &dh, &nn, 3))) { vlog(VLOG_WARN, "compare", "no drawing %s", p); return; }
     for (i = 0; i < S.np && i < 16; i++) {
