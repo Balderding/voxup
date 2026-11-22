@@ -667,19 +667,24 @@ static void outline_for(ShrinkOpt *o, int src) {
     o->outline = (src == FROM_UP && S.has_up ? orig_outlined(S.up, 32, 32) : orig_outlined(S.orig, 16, 16)) ? O_BLACK4 : O_NONE;
 }
 static void reshape_one(int item, Shot *s, const ShrinkOpt *o, LONG gen) {
-    static unsigned char out[128 * 128 * 4]; int W, H;
+    unsigned char *out; int W, H;      /* its own buffer: the reshaper and the drawing thread both come here (review A1) */
     if (!s->drw) {
         char p[MAX_PATH]; int n; shotpath(item, s, 0, p, sizeof p);
         if (!(s->drw = stbi_load(p, &s->dw, &s->dh, &n, 3))) { vlog(VLOG_WARN, "shrink", "no drawing %s", p); s->gen = gen; return; }
     }
     shrink_size(o, 16, 16, &W, &H);
     { ShrinkOpt oo = *o; outline_for(&oo, s->src);
-      if (shrink(s->drw, s->dw, s->dh, fitpic(s->src), 16, 16, &oo, out)) set_res(s, out, W, H, gen); else s->gen = gen; }
+      out = xmalloc(128 * 128 * 4);
+      if (shrink(s->drw, s->dw, s->dh, fitpic(s->src), 16, 16, &oo, out)) set_res(s, out, W, H, gen); else s->gen = gen;
+      free(out); }
 }
+/* the reshaper's thread: its item is fixed when it starts (never S.item, which choose() changes), and stop_reshape
+   waits for it to end before the rounds it works on are freed (review A2) */
+static HANDLE RS_TH; static int RS_ITEM;
 static DWORD WINAPI rs_worker(LPVOID arg) {
     (void)arg;
     for (;;) {
-        ShrinkOpt o; LONG gen; int cur, i, r, did = 0, item = S.item;
+        ShrinkOpt o; LONG gen; int cur, i, r, did = 0, item = RS_ITEM;
         EnterCriticalSection(&S.cs); o = S.opt; gen = S.optgen; cur = S.cur; LeaveCriticalSection(&S.cs);
         if (S.rs_abort) break;
         for (r = 0; r < S.nr; r++) if (r != cur) for (i = 0; i < S.r[r].n; i++) {     /* only the shown round's drawings kept */
@@ -702,11 +707,16 @@ static DWORD WINAPI rs_worker(LPVOID arg) {
 static void kick_reshape(void) {
     HANDLE th;
     if (InterlockedCompareExchange(&S.rs_busy, 1, 0) != 0) return;      /* running: it sees the change itself */
-    S.rs_abort = 0;
+    S.rs_abort = 0; RS_ITEM = S.item;
+    if (RS_TH) { CloseHandle(RS_TH); RS_TH = NULL; }      /* the last one has ended (rs_busy was 0) */
     th = CreateThread(NULL, 0, rs_worker, NULL, 0, NULL);
-    if (th) CloseHandle(th); else InterlockedExchange(&S.rs_busy, 0);
+    if (th) RS_TH = th; else InterlockedExchange(&S.rs_busy, 0);
 }
-static void stop_reshape(void) { int i; S.rs_abort = 1; for (i = 0; i < 600 && S.rs_busy; i++) Sleep(10); }
+static void stop_reshape(void) {
+    S.rs_abort = 1;
+    if (RS_TH) { WaitForSingleObject(RS_TH, INFINITE); CloseHandle(RS_TH); RS_TH = NULL; }
+    InterlockedExchange(&S.rs_busy, 0);
+}
 static void free_rounds(void) {
     int i, j;
     stop_reshape();
@@ -933,6 +943,7 @@ static void choose(int pos) {
     if (S.busy) return;
     if (pos < 0) pos = S.nlist - 1;
     if (pos >= S.nlist) pos = 0;
+    stop_reshape();       /* before S.item changes: the reshaper may still be working on this item's rounds */
     item_opt_leave();
     S.pos = pos; item = S.item = S.list[pos];
     item_opt_arrive(item);
@@ -1309,6 +1320,7 @@ static DWORD WINAPI worker(LPVOID arg) {
     (void)arg;
     unwrap(S.descbuf, desc, sizeof desc);
     for (i = 0; i < S.nm; i++) unwrap(S.m[i].prompt, tm[i], sizeof tm[i]);     /* the prompts as they were at Draw */
+again:
     {   /* ComfyUI made ready when a shot first needs it; the item's picture made once for the built-in engine. The
            round is gone through until no shot waits: one thrown out (right-click) while drawing is drawn again too */
         int comfy_ok = -1, last_model = -1; unsigned char *pic = NULL, pic_fail = 0, freed = 0;
@@ -1355,8 +1367,16 @@ static DWORD WINAPI worker(LPVOID arg) {
         if (!S.stop) status("Round %d done: %d of %d there (%d drawn now, %lu s). Double-click one to keep it, or Space for new seeds.",
                rd + 1, have, R->n, done, (GetTickCount() - t0) / 1000);
         else status("Stopped: %d drawn. Double-click one you like, or Space for new seeds.", done); }
+    {   /* a picture thrown out after the last look (redraw_one sets ST_WAIT under S.cs and only starts a worker when
+           busy is 0): look once more under S.cs before busy is cleared, so none is left waiting (review A3) */
+        int more = 0;
+        EnterCriticalSection(&S.cs);
+        if (!S.stop) for (i = 0; i < R->n; i++) if (R->s[i].st == ST_WAIT) more = 1;
+        if (!more) InterlockedExchange(&S.busy, 0);
+        LeaveCriticalSection(&S.cs);
+        if (more) goto again;
+    }
     free(tm);
-    InterlockedExchange(&S.busy, 0);
     PostMessageA(S.wnd, WM_APP, 0, 0);
     return 0;
 }
@@ -1374,6 +1394,36 @@ static void save_text(int item) {
     } }
 }
 static int round_size(void) { int m, t = 0; for (m = 0; m < S.nm; m++) if (S.m[m].ready) t += S.m[m].n; return t; }
+/* NNN\round-R.txt: what a round was drawn with (review A4): the description, the picture it drew from, each model's
+   engine, strength, LoRA and filled-in prompt. keep.txt takes the description from here, not from the box as it is now */
+static void round_info_path(int item, int round, char *p, int n) { itemdir(item, p, n); snprintf(p + strlen(p), n - strlen(p), "\\round-%d.txt", round + 1); }
+static void write_round_info(int item, int round, const Round *R) {
+    Buf b = { 0 }; char p[MAX_PATH], d[4096], t[4096], pr[12000], l[400]; int m, i, n;
+    unwrap(S.descbuf, d, sizeof d);
+    snprintf(l, sizeof l, "round %d of %03d, drawn from: %s\r\ndescription: ", round + 1, item, FROM_NAMES[R->n ? R->s[0].src : S.from]); buf_str(&b, l);
+    buf_str(&b, d); buf_str(&b, "\r\n");
+    for (m = 0; m < S.nm; m++) {
+        for (i = n = 0; i < R->n; i++) n += R->s[i].model == m;
+        if (!n) continue;
+        snprintf(l, sizeof l, "model %s: %d picture(s), engine %s", S.m[m].id, n, use_sd(m) ? "built-in" : "ComfyUI"); buf_str(&b, l);
+        if (S.m[m].sdimage == 2) { snprintf(l, sizeof l, ", strength %d%%", S.m[m].strength); buf_str(&b, l); }
+        if (S.m[m].has_lora) { snprintf(l, sizeof l, ", LoRA %d%%", S.m[m].lora_w); buf_str(&b, l); }
+        unwrap(S.m[m].prompt, t, sizeof t); make_prompt(t, d, pr, sizeof pr);
+        buf_str(&b, "\r\nprompt: "); buf_str(&b, pr); buf_str(&b, "\r\n");
+    }
+    round_info_path(item, round, p, sizeof p);
+    if (!write_all(p, b.p ? (const void *)b.p : "", b.n)) vlog(VLOG_WARN, "round", "could not write %s", p);
+    free(b.p);
+}
+/* the description a round was drawn with (round-R.txt), else the box as it is */
+static void round_desc(int item, int round, char *d, int n) {
+    char p[MAX_PATH], *t, *q, *e;
+    round_info_path(item, round, p, sizeof p);
+    if ((t = read_all(p, NULL)) && (q = strstr(t, "\ndescription: "))) {
+        q += 14; if ((e = strpbrk(q, "\r\n"))) *e = 0; snprintf(d, n, "%s", q); free(t); return;
+    }
+    free(t); unwrap(S.descbuf, d, n);
+}
 static void start_round(void) {
     Round *R; int i, m; HANDLE th; char d[64];
     if (S.busy || S.nr >= MAXR || round_size() < 1) return;
@@ -1387,6 +1437,7 @@ static void start_round(void) {
         R->s[R->n].model = m; R->s[R->n].seed = s; R->s[R->n].st = ST_WAIT; R->s[R->n].src = S.from == FROM_UP && S.has_up ? FROM_UP : S.from;
         R->n++;
     }
+    write_round_info(S.item, S.nr, R);
     S.drawing_round = S.nr; S.cur = S.nr; S.nr++; S.sel = -1;
     S.stop = 0; InterlockedExchange(&S.busy, 1);
     th = CreateThread(NULL, 0, worker, NULL, 0, NULL);
@@ -1408,7 +1459,7 @@ static void keep(void) {
         else if (N_GAME) status("%d x %d is bigger than the game takes (%d x %d): saved as %s", rw, rh, GAME_MAX, GAME_MAX, dst);
         else status("Saved as %s (voxup.ini has no game = folder)", dst);
         free(px);
-        unwrap(S.descbuf, d, sizeof d);
+        round_desc(S.item, S.cur, d, sizeof d);
         snprintf(line, sizeof line, "%s  %03d %s  %s seed %u  round %d  %dx%d  shrink: %s  EXPORT %s  | %s", stamp, S.item, S.name[S.item], S.m[s->model].name, s->seed, S.cur + 1, rw, rh, how, dst, d);
         snprintf(bk, sizeof bk, "%s\\keep.txt", WORK); append_line(bk, line);
         S.nkeeps++; return;
@@ -1424,7 +1475,7 @@ static void keep(void) {
         if (!stbi_write_png(dst, rw, rh, 4, px, rw * 4)) { vlog(VLOG_ERR, "keep", "could not write %s", dst); ok = 0; }
     }
     free(px);
-    unwrap(S.descbuf, d, sizeof d);
+    round_desc(S.item, S.cur, d, sizeof d);
     snprintf(line, sizeof line, "%s  %03d %s  %s seed %u  round %d  %dx%d  shrink: %s  | %s", stamp, S.item, S.name[S.item], S.m[s->model].name, s->seed, S.cur + 1, rw, rh, how, d);
     snprintf(dst, sizeof dst, "%s\\keep.txt", WORK); append_line(dst, line);
     itemdir(S.item, dst, sizeof dst); strcat(dst, "\\kept.txt");
@@ -1516,18 +1567,25 @@ static void queue_toggle(int k) {
     if (S.nq < 512) { S.queue[S.nq++] = k; queue_save(); status("%03d is on the queue (%d): Run queue draws a round of each.", k, S.nq); }
 }
 static void queue_add_fits(void) { int i, n = 0; for (i = 0; i < S.nlist; i++) { int k = S.list[i]; if (item_fits(k) && !queued(k) && S.nq < 512) { S.queue[S.nq++] = k; n++; } } queue_save(); status("%d item(s) put on the queue (%d on it).", n, S.nq); }
-static void queue_tick(void) {          /* the main loop, when nothing draws: the next queued item's round */
+/* the main loop, when nothing draws: the next queued item's round. An item leaves the queue only when its round has
+   started; when one cannot start, the queue stops and says why, the item still first on it (review A5) */
+static void queue_tick(void) {
+    int k, i, nr0; char d[64];
     if (!S.qrun || S.busy || S.rs_busy) return;
-    while (S.nq) {
-        int k = S.queue[0], i, nr0;
-        memmove(S.queue, S.queue + 1, sizeof(int) * (size_t)(S.nq - 1)); S.nq--; queue_save();
-        for (i = 0; i < S.nlist && S.list[i] != k; i++) ;
-        if (i == S.nlist) continue;
-        choose(i); nr0 = S.nr; start_round();
-        if (S.nr > nr0) return;          /* drawing */
-        vlog(VLOG_WARN, "queue", "%03d skipped: no round started (no description?)", k);
-    }
-    S.qrun = 0; status("The queue is done.");
+    if (!S.nq) { S.qrun = 0; status("The queue is done."); return; }
+    k = S.queue[0];
+    for (i = 0; i < S.nlist && S.list[i] != k; i++) ;
+    if (i == S.nlist) { S.qrun = 0; status("Queue stopped: %03d is not one of the items voxup shows (voxup.ini items = and skip =): take it off the queue (Q on it), then R to go on.", k); return; }
+    if (S.list[S.pos] != k) choose(i);
+    nr0 = S.nr; start_round();
+    if (S.nr > nr0) { memmove(S.queue, S.queue + 1, sizeof(int) * (size_t)(S.nq - 1)); S.nq--; queue_save(); return; }
+    S.qrun = 0; unwrap(S.descbuf, d, sizeof d);
+    if (round_size() < 1) status("Queue stopped at %03d: no model is set to draw (every count is 0, or none is on this computer). Set one, then R to go on.", k);
+    else if (round_size() > MAXSHOT) status("Queue stopped at %03d: more than %d pictures a round. Set fewer, then R to go on.", k, MAXSHOT);
+    else if (!d[0]) status("Queue stopped at %03d: it has no description. Write one, then R to go on.", k);
+    else if (S.nr >= MAXR) status("Queue stopped at %03d: it has %d rounds, the most one item can keep.", k, MAXR);
+    else status("Queue stopped at %03d: its round did not start.", k);
+    vlog(VLOG_WARN, "queue", "stopped at %03d: no round started", k);
 }
 
 /* ---------------------------------------------------------------- one picture thrown out (right-click, Delete) and
@@ -1548,13 +1606,15 @@ static void redraw_one(int k) {
     s->gen = 0; s->bmgen = 0; s->err[0] = 0;
     do sd = rnd(); while (seed_used(sd));
     s->seed = sd; s->src = S.from == FROM_UP && S.has_up ? FROM_UP : S.from; s->st = ST_WAIT;
-    LeaveCriticalSection(&S.cs);
-    if (S.sel == k) S.sel = -1;
-    S.pv_for = -1; S.cmp_for = -1;
-    kick_reshape();
-    status("Picture %d thrown out: a new one is drawn in its place.", k + 1);
-    if (S.busy) return;                  /* the drawing round's worker comes to it */
-    S.drawing_round = S.cur; S.stop = 0; InterlockedExchange(&S.busy, 1);
+    {   int running = S.busy != 0;       /* tested under S.cs: the worker looks again under it before it ends */
+        if (!running) { S.drawing_round = S.cur; S.stop = 0; InterlockedExchange(&S.busy, 1); }
+        LeaveCriticalSection(&S.cs);
+        if (S.sel == k) S.sel = -1;
+        S.pv_for = -1; S.cmp_for = -1;
+        kick_reshape();
+        status("Picture %d thrown out: a new one is drawn in its place.", k + 1);
+        if (running) return;             /* the drawing round's worker comes to it */
+    }
     th = CreateThread(NULL, 0, worker, NULL, 0, NULL);
     if (th) CloseHandle(th); else { InterlockedExchange(&S.busy, 0); status("Could not start the drawing thread: %s", vlog_errno()); }
 }
