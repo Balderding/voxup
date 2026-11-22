@@ -22,6 +22,7 @@
 #define _CRT_RAND_S
 #include <windows.h>
 #include <winhttp.h>
+#include <shlobj.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -75,6 +76,7 @@ static const char *std_prompt(int kind) { return kind == 1 ? KONTEXT_T : kind ==
 
 /* ---------------------------------------------------------------- small helpers */
 static char WORK[MAX_PATH];                 /* out\pick beside the exe */
+static char EXEDIR[MAX_PATH];               /* the folder voxup.exe is in: voxup.ini is there */
 static char MODELS[MAX_PATH];               /* voxup.ini models = (else models beside the exe): models.txt and one ComfyUI graph per model */
 
 static void *xmalloc(size_t n) { void *p = malloc(n ? n : 1); if (!p) { vlog(VLOG_ERR, "mem", "out of memory (%u bytes)", (unsigned)n); exit(3); } return p; }
@@ -514,7 +516,8 @@ static struct {
     int cmp_for; LONG cmp_gen; HBITMAP cmp_bm[17]; int cmp_w[17], cmp_h[17]; char cmp_score[17][64];
     volatile LONG sd_step, sd_steps; DWORD draw_t0; DWORD avg_ms[MAXM]; int nkeeps;
     int show_get, nget, unfocus; WINDOWPLACEMENT wp; int have_wp;   /* models to get shown; Esc in a text box; the window's place */
-    int want[2], split[2], drag, drag_w, cur_we, per; float drag_x; int inl, ing, inr;   /* ...; the panels' inner widths */  /* the side panels' widths: wanted (pick.ini split=), shown; a divider dragged; the grid's columns */
+    int want[2], split[2], drag, drag_w, cur_we, per; float drag_x; int inl, ing, inr;
+    int empty; char empty_msg[400];             /* no sprites yet: the window asks for the folder (2026-11-22, one exe) */   /* ...; the panels' inner widths */  /* the side panels' widths: wanted (pick.ini split=), shown; a divider dragged; the grid's columns */
 } S;
 /* drawn inside voxup: the built-in engine is in this voxup, the model has its lines, and the engine is chosen (or the
    model has no ComfyUI graph) */
@@ -2455,6 +2458,94 @@ static void settings(int save) {
     free(t);
 }
 
+/* every item with an original picture (16 x 16 NNN.png in sprites =), minus voxup.ini's skip list */
+static void scan_items(void) {
+    char p[MAX_PATH]; int k;
+    S.nlist = 0;
+    if (!P_SPRITES[0]) return;
+    for (k = 0; k < ITEMS_MAX; k++) {
+        if (SKIP[k]) continue;
+        snprintf(p, sizeof p, "%s\\%03d.png", P_SPRITES, k);
+        { int w, h, n; if (!stbi_info(p, &w, &h, &n) || w != 16 || h != 16) continue; }    /* the window works with 16 x 16 originals */
+        S.list[S.nlist++] = k;
+        itemdir(k, p, sizeof p); strcat(p, "\\kept.txt"); S.kept[k] = (unsigned char)exists(p);
+    }
+}
+/* voxup.ini beside the exe: "key = value" set (the line replaced, else added), the rest of the file as it was */
+static void ini_set(const char *key, const char *val) {
+    char p[MAX_PATH], *t, *l, *e; Buf b = { 0 }; int done = 0; size_t kn = strlen(key);
+    snprintf(p, sizeof p, "%s\\voxup.ini", EXEDIR);
+    t = read_all(p, NULL);
+    for (l = t; l && *l; l = e) {
+        char *q = l; e = strchr(l, '\n'); e = e ? e + 1 : l + strlen(l);
+        while (*q == ' ' || *q == '\t') q++;
+        if (!done && !strncmp(q, key, kn) && (q[kn] == ' ' || q[kn] == '\t' || q[kn] == '=')) {
+            char line[MAX_PATH + 64]; snprintf(line, sizeof line, "%s = %s\r\n", key, val); buf_str(&b, line); done = 1;
+        } else { size_t n = (size_t)(e - l); char *c = xmalloc(n + 1); memcpy(c, l, n); c[n] = 0; buf_str(&b, c); free(c); }
+    }
+    if (!done) { char line[MAX_PATH + 64]; snprintf(line, sizeof line, "%s = %s\r\n", key, val); buf_str(&b, line); }
+    if (write_all(p, b.p, b.n)) vlog(VLOG_INFO, "ini", "%s: %s = %s", p, key, val);
+    free(b.p); free(t);
+}
+/* the first start: a voxup.ini with plain words, so the next start finds it (nothing else is needed) */
+static void ini_first(void) {
+    char p[MAX_PATH], t[2 * MAX_PATH + 900];
+    snprintf(p, sizeof p, "%s\\voxup.ini", EXEDIR);
+    if (exists(p)) return;
+    snprintf(t, sizeof t,
+        "# voxup.ini: made by voxup on its first start. Lines are \"key = value\"; # starts a comment.\r\n"
+        "# Every key is explained in voxup.ini.example (in voxup's source).\r\n"
+        "\r\n"
+        "# the original sprites, NNN.png (000.png, 001.png ...): voxup asks for this folder\r\n"
+        "sprites =\r\n"
+        "# where Get puts the model files (several GB each): voxup makes this folder\r\n"
+        "model_files = %s\\model-files\r\n"
+        "# optional: where Keep also writes NNN.png (may repeat); without it keeps go to out\\pick\\export\r\n"
+        "# game = C:\\path\\to\\game\\sprites\r\n", EXEDIR);
+    if (write_all(p, t, strlen(t))) vlog(VLOG_INFO, "ini", "first start: wrote %s", p);
+}
+/* Windows' own folder picker; the self-test gives the answer itself (--pick-folder DIR) */
+static const char *TEST_PICK;
+static int pick_folder(char *out, size_t n) {
+    BROWSEINFOW bi; PIDLIST_ABSOLUTE id; wchar_t w[MAX_PATH];
+    if (TEST_PICK) { snprintf(out, n, "%s", TEST_PICK); return 1; }
+    memset(&bi, 0, sizeof bi); bi.hwndOwner = S.wnd; bi.lpszTitle = L"The folder with your sprites (000.png, 001.png ...)";
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    if (!(id = SHBrowseForFolderW(&bi))) return 0;
+    if (!SHGetPathFromIDListW(id, w)) { CoTaskMemFree(id); return 0; }
+    CoTaskMemFree(id); WideCharToMultiByte(CP_UTF8, 0, w, -1, out, (int)n, NULL, NULL); return 1;
+}
+static void choose_sprites(void) {
+    char d[MAX_PATH];
+    if (!pick_folder(d, sizeof d)) return;
+    snprintf(P_SPRITES, MAX_PATH, "%s", d); scan_items();
+    if (!S.nlist) { snprintf(S.empty_msg, sizeof S.empty_msg, "%s holds no 16 x 16 pictures named 000.png, 001.png ...: choose another folder.", d);
+        vlog(VLOG_WARN, "pick", "%s holds no 16 x 16 NNN.png pictures", d); return; }
+    ini_set("sprites", d);
+    S.empty = 0; S.pos = 0; choose(0);
+    status("%d items in %s (saved in voxup.ini). Press Space to draw.", S.nlist, d);
+}
+static void empty_frame(struct nk_context *ctx, int W, int H) {   /* no sprites yet: one thing to do, said plainly */
+    int bw = W < 640 ? W - 40 : 600; struct nk_rect r = nk_rect((float)(W - bw) / 2, (float)(H / 2 - 110), (float)bw, 210);
+    if (!nk_begin(ctx, "voxup", nk_rect(0, 0, (float)W, (float)H), NK_WINDOW_NO_SCROLLBAR)) { nk_end(ctx); return; }
+    nk_layout_space_begin(ctx, NK_STATIC, (float)(H - 16), 1);
+    nk_layout_space_push(ctx, nk_rect(r.x, r.y, r.w, r.h));
+    if (nk_group_begin(ctx, "start", NK_WINDOW_BORDER | NK_WINDOW_NO_SCROLLBAR)) {
+        int i, ready = 0; char lab[200];
+        for (i = 0; i < S.nm; i++) ready += S.m[i].ready;
+        nk_layout_row_dynamic(ctx, 30, 1); nk_label_colored(ctx, "voxup: the models draw your sprites anew, you keep the best", NK_TEXT_CENTERED, GOLD);
+        wrap_lab(ctx, "First, the folder with your sprites: pictures of 16 x 16 named 000.png, 001.png, 002.png ...", nk_rgb(215, 215, 220), bw - 20);
+        nk_layout_row_dynamic(ctx, 44, 1);
+        if (button(ctx, "Choose the sprites folder", 1, 1)) choose_sprites();
+        if (S.empty_msg[0]) wrap_lab(ctx, S.empty_msg, GOLD, bw - 20);
+        snprintf(lab, sizeof lab, "%d models known, %d ready to draw%s", S.nm, ready, ready ? "" : " (Get one in the window once the sprites are in)");
+        wrap_lab(ctx, lab, DIM, bw - 20);
+        nk_group_end(ctx);
+    }
+    nk_layout_space_end(ctx);
+    nk_end(ctx);
+}
 static int gui(int argc, char **argv) {
     const char *shot = NULL, *test_get = NULL; char *draws[2 * MAXM]; int ndraw = 0, drawn = 0; char *sets[64]; int nsets = 0;
     const char *test_from = NULL, *test_split = NULL; int TEV[48][4], ntev = 0, kev = 0;
@@ -2475,6 +2566,7 @@ static int gui(int argc, char **argv) {
             else if (!strcmp(argv[i], "--find") && i + 1 < argc) test_find = argv[++i];             /* the Find box, Enter pressed */
             else if (!strcmp(argv[i], "--click") && i + 1 < argc && ntest_clk < 8) { test_clk[ntest_clk][2] = 1; sscanf(argv[++i], "%d,%d,%d", &test_clk[ntest_clk][0], &test_clk[ntest_clk][1], &test_clk[ntest_clk][2]); ntest_clk++; }   /* X,Y[,N]: N 1 a click, 2 a double-click, 3 a right-click */
             else if (!strcmp(argv[i], "--size") && i + 1 < argc) { sscanf(argv[++i], "%dx%d", &W, &H); if (W < WIN_MIN_W) W = WIN_MIN_W; if (H < WIN_MIN_H) H = WIN_MIN_H; }   /* the hidden window's size */
+            else if (!strcmp(argv[i], "--pick-folder") && i + 1 < argc) TEST_PICK = argv[++i];    /* the folder picker's answer, Choose pressed */
             else if (!strcmp(argv[i], "--split") && i + 1 < argc) test_split = argv[++i];        /* L,R: the side panels' widths, over pick.ini's */
             else if (!strcmp(argv[i], "--drag") && i + 1 < argc && ntev < 40) {   /* X1,Y1,X2,Y2: a divider dragged, as the window gets the mouse */
                 int x1 = 0, y1 = 0, x2 = 0, y2 = 0, st; sscanf(argv[++i], "%d,%d,%d,%d", &x1, &y1, &x2, &y2);
@@ -2496,17 +2588,14 @@ static int gui(int argc, char **argv) {
     if (S.job) { memset(&jl, 0, sizeof jl); jl.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE; SetInformationJobObject(S.job, JobObjectExtendedLimitInformation, &jl, sizeof jl); }
     mkdirs(WORK);
     load_names(); for (k = 0; k < N_DESC; k++) load_desc(P_DESC[k]);
-    for (k = 0; k < ITEMS_MAX; k++) {     /* every item with an original picture, minus voxup.ini's skip list */
-        if (SKIP[k]) continue;
-        snprintf(p, sizeof p, "%s\\%03d.png", P_SPRITES, k);
-        { int w, h, n; if (!stbi_info(p, &w, &h, &n) || w != 16 || h != 16) continue; }    /* the window works with 16 x 16 originals */
-        S.list[S.nlist++] = k;
-        itemdir(k, p, sizeof p); strcat(p, "\\kept.txt"); S.kept[k] = (unsigned char)exists(p);
+    scan_items();
+    if (!S.nlist) {     /* no sprites yet: the window opens and asks for the folder (no message box, no quitting) */
+        S.empty = 1;
+        if (P_SPRITES[0]) snprintf(S.empty_msg, sizeof S.empty_msg, "%s (voxup.ini sprites =) holds no 16 x 16 pictures named 000.png, 001.png ...", P_SPRITES);
+        vlog(VLOG_WARN, "pick", "no items%s%s: the window asks for the sprites folder", P_SPRITES[0] ? " in " : " (sprites = not set)", P_SPRITES);
     }
-    if (!S.nlist) { char m[MAX_PATH + 200]; snprintf(m, sizeof m, "No item pictures (NNN.png) found in \"%s\".\nSet sprites = in voxup.ini beside voxup.exe (see voxup.ini.example).", P_SPRITES);
-        vlog(VLOG_ERR, "pick", "no items: %s holds no pictures", P_SPRITES); if (!shot) MessageBoxA(NULL, m, "voxup", MB_OK); return 1; }
     load_models();
-    if (!S.nm) { if (!shot) MessageBoxA(NULL, "No models: see out\\voxup.log (models\\models.txt beside voxup.exe)", "voxup", MB_OK); return 1; }
+    if (!S.nm) vlog(VLOG_ERR, "models", "no models at all: the list built into voxup.exe is missing too");
     for (i = 0; i < S.nm; i++) {     /* each model's prompt: out\pick\ID-prompt.txt when changed, else its standard one */
         snprintf(p, sizeof p, "%s\\%s-prompt.txt", WORK, S.m[i].id);
         if ((t = read_all(p, NULL))) { wrap(t, S.m[i].prompt, sizeof S.m[i].prompt, 34); free(t); }
@@ -2551,7 +2640,7 @@ static int gui(int argc, char **argv) {
         snprintf(g0, sizeof g0, "%s\\selftest-game\\data", WORK); snprintf(g1, sizeof g1, "%s\\selftest-game\\dist", WORK);
         GAMEDIRS[0] = g0; GAMEDIRS[1] = g1; N_GAME = 2; snprintf(GAMETAG[0], 16, "data"); snprintf(GAMETAG[1], 16, "dist");
     }
-    choose(S.pos);
+    if (!S.empty) choose(S.pos);
     if (test_from) { int f; for (f = 0; f < 3; f++) if (!strcmp(test_from, FROM_NAMES[f]) && (f != FROM_UP || S.has_up)) { S.from = f; load_desc_text(S.item); } }
     if (test_find) { snprintf(S.find, sizeof S.find, "%s", test_find); first_fit(); }
     if (shot && test_get) { if ((k = find_model(test_get)) < 0) vlog(VLOG_ERR, "selftest", "--get: no model \"%s\"", test_get); else start_get(k); }
@@ -2572,12 +2661,13 @@ static int gui(int argc, char **argv) {
         nk_input_end(ctx);
         GetClientRect(S.wnd, &rc);
         if (shot) { rc.right = W; rc.bottom = H; }
-        gui_frame(ctx, rc.right > 200 ? rc.right : W, rc.bottom > 200 ? rc.bottom : H);
+        if (S.empty) empty_frame(ctx, rc.right > 200 ? rc.right : W, rc.bottom > 200 ? rc.bottom : H);
+        else gui_frame(ctx, rc.right > 200 ? rc.right : W, rc.bottom > 200 ? rc.bottom : H);
         {   /* a changed setting: a new generation, the shown round made again in the background */
             static ShrinkOpt last; static int have;
             if (!have || memcmp(&last, &S.opt, sizeof last)) { if (have) { InterlockedIncrement(&S.optgen); kick_reshape(); if (S.own_opt) item_opt_save(S.item); } last = S.opt; have = 1; }
         }
-        queue_tick();
+        if (!S.empty) queue_tick();
         nk_gdi_render(nk_rgb(30, 32, 38));
         frames++;
         if (shot && !S.busy && !S.dl_busy && !S.rs_busy && !S.qrun && frames > 3) {
@@ -2588,6 +2678,7 @@ static int gui(int argc, char **argv) {
                 PostMessageA(S.wnd, msg, msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK ? MK_LBUTTON : msg == WM_RBUTTONDOWN ? MK_RBUTTON : 0, MAKELPARAM(test_clk[kc][0], test_clk[kc][1]));
                 if (++ph == 5 || !SEQ[n][ph]) { vlog(VLOG_INFO, "selftest", "mouse %d at %d,%d", n, test_clk[kc][0], test_clk[kc][1]); ph = 0; if (++kc == ntest_clk) ntest_clk = 0; }
                 continue; }
+            if (S.empty && TEST_PICK) { choose_sprites(); TEST_PICK = NULL; continue; }
             if (kev < ntev) {   /* a drag: posted to the hidden window one message a frame, the real mouse never moves */
                 PostMessageA(S.wnd, (UINT)TEV[kev][0], (WPARAM)TEV[kev][1], MAKELPARAM(TEV[kev][2], TEV[kev][3]));
                 if (TEV[kev][0] == WM_LBUTTONUP) vlog(VLOG_INFO, "selftest", "dragged to %d,%d: panels %d | %d", TEV[kev][2], TEV[kev][3], S.want[0], S.want[1]);
@@ -2601,6 +2692,7 @@ static int gui(int argc, char **argv) {
                 snprintf(g0, sizeof g0, "%s\\selftest-game\\data", WORK); snprintf(g1, sizeof g1, "%s\\selftest-game\\dist", WORK);
                 GAMEDIRS[0] = g0; GAMEDIRS[1] = g1; N_GAME = 2; snprintf(GAMETAG[0], 16, "data"); snprintf(GAMETAG[1], 16, "dist"); keep(); if (test_undo) undo_keep(); test_keep = 0; continue;
             }
+            if (frames > 6 && S.empty) { save_bmp(shot, W, H); vlog(VLOG_INFO, "selftest", "wrote %s (the empty start)", shot); break; }
             if (frames > 6) { save_bmp(shot, W, H); vlog(VLOG_INFO, "selftest", "wrote %s (%d x %d, panels %d | grid %d columns | %d)", shot, W, H, S.split[0], S.per, S.split[1]); break; }
         }
     }
@@ -2655,10 +2747,13 @@ int main(int argc, char **argv) {
     char exe[MAX_PATH], *e; int r;
     GetModuleFileNameA(NULL, exe, sizeof exe);
     if ((e = strrchr(exe, '\\'))) *e = 0;
+    snprintf(EXEDIR, sizeof EXEDIR, "%s", exe);
     /* the self-test keeps to a folder of its own: its rounds and keeps never show in the real window */
     snprintf(WORK, sizeof WORK, argc > 1 && !strcmp(argv[1], "--selftest") ? "%s\\out\\pick-selftest" : "%s\\out\\pick", exe);
     snprintf(MODELS, sizeof MODELS, "%s\\models", exe);
+    if (argc == 1 || !strcmp(argv[1], "--selftest")) ini_first();     /* the window's first start: voxup.ini made */
     read_ini(exe, argc > 1 && !strcmp(argv[1], "--selftest"));
+    if (!P_SHARED[0]) snprintf(P_SHARED, MAX_PATH, "%s\\model-files", exe);      /* Get's folder: beside the exe unless set */
     if (argc > 1 && strcmp(argv[1], "--selftest")) {
         /* the command line: a window program has no console unless its parent's is borrowed */
         if (GetStdHandle(STD_ERROR_HANDLE) == NULL || GetStdHandle(STD_ERROR_HANDLE) == INVALID_HANDLE_VALUE) {
