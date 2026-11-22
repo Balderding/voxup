@@ -1608,11 +1608,14 @@ static void write_round_info(int item, int round, const Round *R) {
     if (!write_all(p, b.p ? (const void *)b.p : "", b.n)) vlog(VLOG_WARN, "round", "could not write %s", p);
     free(b.p);
 }
-/* the description a round was drawn with (round-R.txt), else the box as it is */
-static void round_desc(int item, int round, char *d, int n) {
-    char p[MAX_PATH], *t, *q, *e;
+/* the description a picture was drawn with: its own "redraw" line in round-R.txt (drawn again later, review 2 P3-2),
+   else the round's, else the box as it is */
+static void round_desc(int item, int round, const char *mid, unsigned seed, char *d, int n) {
+    char p[MAX_PATH], *t, *q, *e, k[80];
     round_info_path(item, round, p, sizeof p);
-    if ((t = read_all(p, NULL)) && (q = strstr(t, "\ndescription: "))) {
+    snprintf(k, sizeof k, "\nredraw %s %u description: ", mid, seed);
+    if ((t = read_all(p, NULL)) && ((q = strstr(t, k)) != NULL)) { q += strlen(k); if ((e = strpbrk(q, "\r\n"))) *e = 0; snprintf(d, n, "%s", q); free(t); return; }
+    if (t && (q = strstr(t, "\ndescription: "))) {
         q += 14; if ((e = strpbrk(q, "\r\n"))) *e = 0; snprintf(d, n, "%s", q); free(t); return;
     }
     free(t); unwrap(S.descbuf, d, n);
@@ -1624,6 +1627,7 @@ static void start_round(void) {
     if (round_size() > MAXSHOT) { status("At most %d pictures a round: set fewer.", MAXSHOT); return; }
     unwrap(S.descbuf, d, sizeof d);
     if (!d[0]) { status("Write what the item is first (the box under the pictures)."); return; }
+    S.desc_made = 0;     /* drawn with it: the "made from the other, check it" label has done its work (P3-4) */
     save_text(S.item);
     R = &S.r[S.nr]; memset(R, 0, sizeof *R);
     for (m = 0; m < S.nm; m++) for (i = 0; S.m[m].ready && i < S.m[m].n; i++) {
@@ -1692,7 +1696,7 @@ static void keep(void) {
         else if (N_GAME) status("%d x %d is bigger than the game takes (%d x %d): saved as %s", rw, rh, GAME_MAX, GAME_MAX, dst);
         else status("Saved as %s (voxup.ini has no game = folder)", dst);
         free(px);
-        round_desc(S.item, S.cur, d, sizeof d);
+        round_desc(S.item, S.cur, S.m[s->model].id, s->seed, d, sizeof d);
         snprintf(line, sizeof line, "%s  %03d %s  %s seed %u  round %d  %dx%d  shrink: %s  EXPORT %s  | %s", stamp, S.item, S.name[S.item], S.m[s->model].name, s->seed, S.cur + 1, rw, rh, how, dst, d);
         snprintf(bk, sizeof bk, "%s\\keep.txt", WORK); append_line(bk, line);
         S.nkeeps++; return;
@@ -1708,7 +1712,7 @@ static void keep(void) {
         if (!stbi_write_png(dst, rw, rh, 4, px, rw * 4)) { vlog(VLOG_ERR, "keep", "could not write %s", dst); ok = 0; }
     }
     free(px);
-    round_desc(S.item, S.cur, d, sizeof d);
+    round_desc(S.item, S.cur, S.m[s->model].id, s->seed, d, sizeof d);
     snprintf(line, sizeof line, "%s  %03d %s  %s seed %u  round %d  %dx%d  shrink: %s  | %s", stamp, S.item, S.name[S.item], S.m[s->model].name, s->seed, S.cur + 1, rw, rh, how, d);
     snprintf(dst, sizeof dst, "%s\\keep.txt", WORK); append_line(dst, line);
     itemdir(S.item, dst, sizeof dst); strcat(dst, "\\kept.txt");
@@ -1862,6 +1866,13 @@ static void redraw_one(int k) {
     s->gen = 0; s->bmgen = 0; s->err[0] = 0;
     do sd = rnd(); while (seed_used(sd));
     s->seed = sd; s->src = S.from == FROM_UP && S.has_up ? FROM_UP : S.from; s->st = ST_WAIT;
+    {   /* the box now says something else than when the round was drawn: this picture's own line (review 2, P3-2) */
+        char was[4096], now[4096], rp[MAX_PATH], line[4200], *t2, *q2, *e2; was[0] = 0;
+        unwrap(S.descbuf, now, sizeof now); round_info_path(S.item, S.cur, rp, sizeof rp);
+        if ((t2 = read_all(rp, NULL)) && (q2 = strstr(t2, "\ndescription: "))) { q2 += 14; if ((e2 = strpbrk(q2, "\r\n"))) *e2 = 0; snprintf(was, sizeof was, "%s", q2); }
+        free(t2);
+        if (strcmp(was, now)) { snprintf(line, sizeof line, "redraw %s %u description: %s", S.m[s->model].id, sd, now); append_line(rp, line); }
+    }
     {   int running = S.busy != 0;       /* tested under S.cs: the worker looks again under it before it ends */
         if (!running) { S.drawing_round = S.cur; S.stop = 0; InterlockedExchange(&S.busy, 1); }
         LeaveCriticalSection(&S.cs);
@@ -2546,6 +2557,7 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
         }
         nk_layout_row_dynamic(ctx, 20, 1);
         if (S.keptinfo[0]) nk_label_colored(ctx, S.keptinfo, NK_TEXT_LEFT, TEALT); else nk_label_colored(ctx, "Not kept yet", NK_TEXT_LEFT, DIM);
+        if (S.desc_made) S.desc_word = tilt_word(S.descbuf);      /* as the words are now (review 2, P3-4) */
         if (S.desc_made) nk_ext_wrap_label(ctx, S.desc_word ? "What it is: made from the other, still says it lies tilted" : "What it is: made from the other, check it", GOLD, S.inl);
         else nk_label_colored(ctx, "What it is (goes into the prompt)", NK_TEXT_LEFT, GOLD);
         nk_layout_row_dynamic(ctx, 110, 1);
