@@ -3069,6 +3069,8 @@ static int gui(int argc, char **argv) {
             else if (!strcmp(argv[i], "--accept-licence")) test_accept = 1;     /* Accept and get, when the licence is asked */
             else if (!strcmp(argv[i], "--pick-folder") && i + 1 < argc) TEST_PICK = argv[++i];    /* the folder picker's answer, Choose pressed */
             else if (!strcmp(argv[i], "--split") && i + 1 < argc) test_split = argv[++i];        /* L,R: the side panels' widths, over pick.ini's */
+            else if (!strcmp(argv[i], "--type") && i + 1 < argc) {   /* TEXT typed (WM_CHAR, after the clicks): a text box gets it as from the keyboard */
+                const char *c = argv[++i]; for (; *c && ntev < 48; c++) { TEV[ntev][0] = WM_CHAR; TEV[ntev][1] = (unsigned char)*c; TEV[ntev][2] = 0; TEV[ntev++][3] = 0; } }
             else if (!strcmp(argv[i], "--drag") && i + 1 < argc && ntev < 40) {   /* X1,Y1,X2,Y2: a divider dragged, as the window gets the mouse */
                 int x1 = 0, y1 = 0, x2 = 0, y2 = 0, st; sscanf(argv[++i], "%d,%d,%d,%d", &x1, &y1, &x2, &y2);
                 TEV[ntev][0] = WM_MOUSEMOVE; TEV[ntev][1] = 0; TEV[ntev][2] = x1; TEV[ntev++][3] = y1;
@@ -3209,7 +3211,9 @@ static int gui(int argc, char **argv) {
                 GAMEDIRS[0] = g0; GAMEDIRS[1] = g1; N_GAME = 2; snprintf(GAMETAG[0], 16, "data"); snprintf(GAMETAG[1], 16, "dist"); keep(); test_keep--; continue;
             }
             if (frames > 6 && S.empty) { save_bmp(shot, (int)(W * S.ui), (int)(H * S.ui)); vlog(VLOG_INFO, "selftest", "wrote %s (the empty start)", shot); break; }
-            if (frames > 6) { save_bmp(shot, (int)(W * S.ui), (int)(H * S.ui)); vlog(VLOG_INFO, "selftest", "wrote %s (%d x %d, panels %d | grid %d columns | %d%s%s)", shot, W, H, S.split[0], S.per, S.split[1], S.fold[0] ? ", left folded" : "", S.fold[1] ? ", right folded" : ""); break; }
+            if (frames > 6) { char dsc[4096]; size_t dl; unwrap(S.descbuf, dsc, sizeof dsc); dl = strlen(dsc);
+                vlog(VLOG_INFO, "selftest", "text boxes: Find \"%s\", What it is \"%.40s ... %s\"", S.find, dsc, dl > 40 ? dsc + dl - 40 : "");
+                save_bmp(shot, (int)(W * S.ui), (int)(H * S.ui)); vlog(VLOG_INFO, "selftest", "wrote %s (%d x %d, panels %d | grid %d columns | %d%s%s)", shot, W, H, S.split[0], S.per, S.split[1], S.fold[0] ? ", left folded" : "", S.fold[1] ? ", right folded" : ""); break; }
         }
     }
     if (S.busy) { InterlockedExchange(&S.stop, 1); for (i = 0; i < 100 && S.busy; i++) Sleep(100); }

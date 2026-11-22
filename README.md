@@ -254,12 +254,12 @@ In pipeline order (`src/shrink.c`, sources in its header):
   settings into `OUTDIR\NNN-*.png`, to measure settings against each other.
 - `voxup --shrinkcheck DIR`: the pipeline with its standard settings against `--to32` on every drawing in
   `DIR\NNN\*-sSEED.png` (they must be equal).
-- `voxup --selftest SHOT.bmp [ITEM] [--get ID] [--draw ID N ...] [--seeds A,B] [--set key=value] [--tab 0|1|2] [--from tool|upright|original] [--keep ...] [--undo ...] [--find TEXT] [--redraw N] [--key CODE ...] [--click X,Y[,N]] [--size WxH] [--split L,R] [--drag X1,Y1,X2,Y2] [--fold L,R] [--dpi N] [--contrast] [--pick-folder DIR] [--accept-licence] [--novulkan]`:
+- `voxup --selftest SHOT.bmp [ITEM] [--get ID] [--draw ID N ...] [--seeds A,B] [--set key=value] [--tab 0|1|2] [--from tool|upright|original] [--keep ...] [--undo ...] [--find TEXT] [--redraw N] [--key CODE ...] [--click X,Y[,N]] [--size WxH] [--split L,R] [--drag X1,Y1,X2,Y2] [--fold L,R] [--dpi N] [--type TEXT] [--contrast] [--pick-folder DIR] [--accept-licence] [--novulkan]`:
   the window off screen, never shown; it can get a model, draw, set shrink settings, press Keep (into
   `work-selftest\selftest-game`) and undo it, use the Find box, throw picture N out, and press keys (Windows key
   codes, e.g. 34 PgDn, 82 R), click the mouse (N: 1 click, 2 double-click, 3 right-click; never into the real game folders), then writes the window's picture.
   `--keep` and `--undo` may repeat; `--size` the window, `--split` the side panels' widths, `--drag` a divider (posted to
-  the hidden window), `--fold` a side folded, `--dpi` the window as on a monitor of that DPI, `--contrast` each text
+  the hidden window), `--fold` a side folded, `--dpi` the window as on a monitor of that DPI, `--type` text typed into the box clicked last, `--contrast` each text
   colour's contrast in the log, `--pick-folder` the folder picker's answer, `--accept-licence` the licence click,
   `--novulkan` as if the graphics driver had no Vulkan.
 - `voxup IN.raw OUT.raw [switches]`: the older voxel upscaler (`src/voxup.c`).
