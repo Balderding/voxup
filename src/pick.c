@@ -727,7 +727,10 @@ static void load_models(void) {
 
 /* a picture for the window: RGBA w x h, each pixel scale x scale, on the sheets' checker (or as it is when opaque) */
 static HBITMAP mkbmp(const unsigned char *rgba, int w, int h, int scale, int rgb3) {
-    BITMAPINFO bi; unsigned char *bits; HBITMAP b; int W = w * scale, H = h * scale, x, y, row, q;
+    BITMAPINFO bi; unsigned char *bits; HBITMAP b; int W, H, x, y, row, q;
+    {   /* the zoom on screen: the largest whole one that fits the picture's box at the window's scale (review 3, P2-2) */
+        int zs = (int)(scale * (S.ui > 0 ? S.ui : 1.0f) + 0.001f); scale = zs > 0 ? zs : 1; }
+    W = w * scale; H = h * scale;
     memset(&bi, 0, sizeof bi);
     bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER); bi.bmiHeader.biWidth = W; bi.bmiHeader.biHeight = -H;
     bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 24; bi.bmiHeader.biCompression = BI_RGB;

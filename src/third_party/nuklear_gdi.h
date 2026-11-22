@@ -116,6 +116,7 @@ nk_delete_image(struct nk_image * image)
     }
 }
 
+static float nk_gdi_ui = 1.0f;     /* voxup: the window's DPI scale (see nk_gdi_set_scale) */
 static void
 nk_gdi_draw_image(short x, short y, unsigned short w, unsigned short h,
     struct nk_image img, struct nk_color col)
@@ -130,7 +131,21 @@ nk_gdi_draw_image(short x, short y, unsigned short w, unsigned short h,
     hDCBits = CreateCompatibleDC(gdi.memory_dc);
     GetObject(hbm, sizeof(BITMAP), (LPSTR)&bitmap);
     SelectObject(hDCBits, hbm);
-    StretchBlt(gdi.memory_dc, x, y, w, h, hDCBits, 0, 0, bitmap.bmWidth, bitmap.bmHeight, SRCCOPY);
+    {   /* voxup: a picture lands on whole screen pixels: drawn at the largest whole multiple of its own pixels that fits
+           its box on screen, centred in it (never stretched by an uneven amount); one bigger than its box is
+           stretched as before. 2026-11-22 */
+        float tw = w * nk_gdi_ui, th = h * nk_gdi_ui;
+        if (bitmap.bmWidth > 0 && bitmap.bmHeight > 0 && bitmap.bmWidth <= tw + 0.5f && bitmap.bmHeight <= th + 0.5f) {
+            int kx = (int)((tw + 0.01f) / bitmap.bmWidth), ky = (int)((th + 0.01f) / bitmap.bmHeight), k = kx < ky ? kx : ky, pw, ph, px, py;
+            XFORM xf; GetWorldTransform(gdi.memory_dc, &xf);
+            if (k < 1) k = 1;
+            pw = k * bitmap.bmWidth; ph = k * bitmap.bmHeight;
+            px = (int)(x * nk_gdi_ui + (tw - pw) / 2 + 0.5f); py = (int)(y * nk_gdi_ui + (th - ph) / 2 + 0.5f);
+            ModifyWorldTransform(gdi.memory_dc, NULL, MWT_IDENTITY);
+            StretchBlt(gdi.memory_dc, px, py, pw, ph, hDCBits, 0, 0, bitmap.bmWidth, bitmap.bmHeight, SRCCOPY);
+            SetWorldTransform(gdi.memory_dc, &xf);
+        } else StretchBlt(gdi.memory_dc, x, y, w, h, hDCBits, 0, 0, bitmap.bmWidth, bitmap.bmHeight, SRCCOPY);
+    }
     DeleteDC(hDCBits);
 }
 
@@ -549,7 +564,6 @@ nk_gdi_clear(HDC dc, struct nk_color col)
    bitmap is the window's real size and every drawing call goes through a world transform, so text is drawn by Windows at
    the real size (crisp) and pictures are stretched nearest-neighbour (COLORONCOLOR: pixel art stays sharp). Mouse
    positions are divided back. 2026-11-22 */
-static float nk_gdi_ui = 1.0f;
 NK_API void nk_gdi_set_scale(float s) { nk_gdi_ui = s > 0.25f ? s : 1.0f; }
 #define NK_GDI_X(l) ((short)((float)(short)LOWORD(l) / nk_gdi_ui))
 #define NK_GDI_Y(l) ((short)((float)(short)HIWORD(l) / nk_gdi_ui))
