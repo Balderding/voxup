@@ -25,9 +25,15 @@ static int wrap_lines(const struct nk_user_font *f, const char *t, float w) {
     return lines;
 }
 struct nk_rect nk_ext_wrap_label(struct nk_context *ctx, const char *t, struct nk_color c, int w) {
-    const struct nk_user_font *f = ctx->style.font; int lines = w > 40 ? wrap_lines(f, t, (float)w - 2 * ctx->style.text.padding.x - 8) : 2; struct nk_rect b;
+    /* the width Nuklear wraps in: the panel's own row width (not the caller's guess, w is the fallback), less the
+       text padding; the height its wrap needs: each line f->height + 2 x padding, and the row's padding (review 3, P3-6) */
+    const struct nk_user_font *f = ctx->style.font; struct nk_rect b; float pw = ctx->current && ctx->current->layout ? ctx->current->layout->bounds.w : 0, px = ctx->style.text.padding.x, py = ctx->style.text.padding.y, lh;
+    int lines;
+    if (pw < 40) pw = (float)w;
+    lines = pw > 40 ? wrap_lines(f, t, pw - 2 * px) : 2;
     if (lines > 8) lines = 8;
-    nk_layout_row_dynamic(ctx, 18.0f * (float)lines + 2, 1); b = nk_widget_bounds(ctx); nk_label_colored_wrap(ctx, t, c);
+    lh = f->height + 2 * py;
+    nk_layout_row_dynamic(ctx, lh * (float)lines + 3 * py + 1, 1); b = nk_widget_bounds(ctx); nk_label_colored_wrap(ctx, t, c);
     return b;
 }
 
