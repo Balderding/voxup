@@ -63,8 +63,21 @@ The sprites in these pictures are from OpenGameArt and are CC0 (public domain):
   recommended model with one click. Every download shows the model's licence first (one click to accept), is checked
   against its SHA-256, and goes on from where it stopped. Vulkan (part of the graphics driver) is only loaded to draw.
   No Python and no ComfyUI are needed; the models only ComfyUI can draw are folded away until `comfy =` is set.
-- **Panels you can resize**: drag the lines between the three panels (double-click: the standard width); the grid
-  shows as many pictures a row as fit, and every row fits its panel, down to a 900 x 600 window.
+- **Panels you can resize**: drag the lines between the three panels (double-click: the standard width; kept in
+  `work\pick.ini` `split=`); the grid shows as many pictures a row as fit, and every row fits its panel, down to a
+  900 x 600 window. A side panel folds to a thin strip (its **<** / **>** button, or **Ctrl+[** / **Ctrl+]**) and the
+  pictures take the room; a click on the strip opens it again.
+- **Sharp on any screen**: at 150 % or 200 % Windows scaling voxup draws itself at the real size (per-monitor DPI):
+  text is crisp and every sprite pixel a whole number of screen pixels.
+- **Undo everything this session**: **Ctrl+Z** takes back keeps and setting changes, one at a time, newest first.
+- **Palettes**: Colours: **A palette**: a palette file (`.hex` from Lospec, GIMP `.gpl`, Paint.NET `.txt`, or a `.png`
+  of the colours; `palette =` in voxup.ini), EGA 16, PICO-8, Game Boy, C64, or **the set's colours**: every colour of
+  the originals the Find box lets through, so a set of items shares one palette.
+- **Settings fold**: only Size, Colours and Outline are open at first; a section's title opens or folds it. Methods
+  that were tried but are not better by default (Grid snap, the colours found by k-means / median cut / Wu, the
+  edge-speck rule) are under **More methods**, each with a line on when it helps, and in Compare.
+- **Easier to read**: every text colour at least 4.5 : 1 against its ground; the key list is one line until clicked;
+  tooltips wait until the mouse rests on a thing; Compare shows each sprite at 1x too.
 - **Fewer clicks.** Every feature is one click or one key away: Space draws, double-click or Enter keeps, right-click
   or Delete draws that one picture again, PgUp/PgDn change the item, Ctrl+Z undoes the last keep, 1 2 3 change the
   right panel, F1... take a preset (the full list is below).
@@ -110,7 +123,8 @@ Everything is one click or one key away:
 | arrow keys | choose a picture in the round |
 | **PgUp** / **PgDn** | item before / after (only the items the Find box lets through) |
 | **Home** / **End** (or `,` `.`) | earlier / later round |
-| **Ctrl+Z** | undo the last keep |
+| **Ctrl+Z** | undo: the last keep or setting change, then the one before (this session) |
+| **Ctrl+[** / **Ctrl+]** | fold or open the left / right panel |
 | **Ctrl+F** or **/** | the Find box |
 | **Q** / **R** | this item on or off the queue / run the queue |
 | **1** **2** **3** | the right panel: Chosen, Settings, Compare |
@@ -118,6 +132,8 @@ Everything is one click or one key away:
 | **O** / **M** | the original's colours / the model's own |
 
 No key does anything while a text box or a number is being typed in (but Ctrl+Enter); **Esc** leaves the text box.
+The lines between the panels can be dragged (double-click: the standard width); the window is never smaller than
+900 x 600, so Draw, Keep and the original stay in sight.
 **Draw** and **Stop** sit over the pictures with the status line under them; the models still to get are folded into
 one row (**N more models to get...**). The window comes back where and as big as it was, on the panel it showed.
 
@@ -231,15 +247,21 @@ In pipeline order (`src/shrink.c`, sources in its header):
 - `voxup --to32 DRAWING.png ITEM OUT.png [--own]`: one drawing to the standard 32 x 32 sprite.
 - `voxup --shrink DRAWING.png ITEM OUT.png [key=value ...]`: one drawing through any shrink settings (the names are
   those in `work\pick.ini`'s `shrink.` lines, e.g. `method=9 outline=3 othick=2 size=2 cw=24 ch=40`).
-- `voxup --upright SPRITE.png OUT.png [turn=auto|DEG] [style=classic|centred] [slim=off|sword|shaft]
+- `voxup --upright SPRITE.png OUT.png [turn=auto|force|DEG] [style=classic|centred] [slim=off|sword|shaft]
   [outline=auto|on|off] [big=PX]`: a sprite stood upright at 32 x 32 (with `big=`: the large clean picture the models
-  get).
+  get). `turn=auto` leaves an item that is not tilted alone and says so; `turn=force` turns it anyway.
+- `voxup --shrinkall DIR OUTDIR [key=value ...] [palfile=PATH]`: every drawing in `DIR\NNN\*-sSEED.png` through those
+  settings into `OUTDIR\NNN-*.png`, to measure settings against each other.
 - `voxup --shrinkcheck DIR`: the pipeline with its standard settings against `--to32` on every drawing in
   `DIR\NNN\*-sSEED.png` (they must be equal).
-- `voxup --selftest SHOT.bmp [ITEM] [--get ID] [--draw ID N ...] [--seeds A,B] [--set key=value] [--tab 0|1|2] [--from tool|upright|original] [--keep [--undo]] [--find TEXT] [--redraw N] [--key CODE ...] [--click X,Y[,N]]`:
+- `voxup --selftest SHOT.bmp [ITEM] [--get ID] [--draw ID N ...] [--seeds A,B] [--set key=value] [--tab 0|1|2] [--from tool|upright|original] [--keep ...] [--undo ...] [--find TEXT] [--redraw N] [--key CODE ...] [--click X,Y[,N]] [--size WxH] [--split L,R] [--drag X1,Y1,X2,Y2] [--fold L,R] [--dpi N] [--contrast] [--pick-folder DIR] [--accept-licence] [--novulkan]`:
   the window off screen, never shown; it can get a model, draw, set shrink settings, press Keep (into
   `work-selftest\selftest-game`) and undo it, use the Find box, throw picture N out, and press keys (Windows key
   codes, e.g. 34 PgDn, 82 R), click the mouse (N: 1 click, 2 double-click, 3 right-click; never into the real game folders), then writes the window's picture.
+  `--keep` and `--undo` may repeat; `--size` the window, `--split` the side panels' widths, `--drag` a divider (posted to
+  the hidden window), `--fold` a side folded, `--dpi` the window as on a monitor of that DPI, `--contrast` each text
+  colour's contrast in the log, `--pick-folder` the folder picker's answer, `--accept-licence` the licence click,
+  `--novulkan` as if the graphics driver had no Vulkan.
 - `voxup IN.raw OUT.raw [switches]`: the older voxel upscaler (`src/voxup.c`).
 
 ## Building
