@@ -27,6 +27,18 @@ int nk_ext_splitter(struct nk_context *ctx, int active, struct nk_color hot, str
     else if (ws == NK_WIDGET_VALID && nk_input_is_mouse_click_down_in_rect(in, NK_BUTTON_LEFT, b, nk_true)) r |= NK_EXT_SPLIT_PRESS;
     lit = (r & NK_EXT_SPLIT_HOVER) || active;
     nk_fill_rect(nk_window_get_canvas(ctx), nk_rect(b.x + b.w / 2 - 1, b.y + 4, lit ? 3.0f : 2.0f, b.h - 8), 0, lit ? hot : line);
-    if ((r & NK_EXT_SPLIT_HOVER) && tip) nk_tooltip(ctx, tip);
+    if ((r & NK_EXT_SPLIT_HOVER) && tip) nk_ext_tooltip(ctx, tip);
     return r;
 }
+
+static unsigned TIP_NOW, TIP_T0, TIP_KEY, TIP_FRAME, TIP_LAST; static int TIP_WAIT;
+void nk_ext_frame(unsigned now_ms) { TIP_NOW = now_ms; TIP_FRAME++; TIP_WAIT = 0; }
+void nk_ext_tooltip(struct nk_context *ctx, const char *text) {
+    unsigned k = 5381; const char *p;
+    for (p = text; *p; p++) k = k * 33 + (unsigned char)*p;
+    k ^= (unsigned)(int)ctx->input.mouse.pos.x / 8 * 7919u ^ (unsigned)(int)ctx->input.mouse.pos.y / 8 * 104729u;   /* the same thing, roughly the same place */
+    if (k != TIP_KEY || TIP_LAST + 1 < TIP_FRAME) { TIP_KEY = k; TIP_T0 = TIP_NOW; }       /* new, or not asked for last frame: start waiting */
+    TIP_LAST = TIP_FRAME;
+    if (TIP_NOW - TIP_T0 >= NK_EXT_TIP_MS) nk_tooltip(ctx, text); else TIP_WAIT = 1;
+}
+int nk_ext_tip_waiting(void) { return TIP_WAIT; }
