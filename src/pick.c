@@ -1468,6 +1468,10 @@ static void keep(void) {
     if (S.sel < 0 || S.cur >= S.nr || S.sel >= S.r[S.cur].n) return;
     s = &S.r[S.cur].s[S.sel];
     if (s->st != ST_DONE) return;
+    if (s->gen != S.optgen) {      /* not yet remade with the settings as they are: remade now, so Keep writes what the
+                                      settings say (review A10); the reshaper is stopped first, then goes on */
+        stop_reshape(); reshape_one(S.item, s, &S.opt, S.optgen); kick_reshape();
+    }
     strftime(stamp, sizeof stamp, "%Y-%m-%d_%H%M%S", tm);
     if (!s->res) return;
     EnterCriticalSection(&S.cs); rw = s->rw; rh = s->rh; px = xmalloc((size_t)rw * rh * 4); memcpy(px, s->res, (size_t)rw * rh * 4); LeaveCriticalSection(&S.cs);
