@@ -1948,13 +1948,40 @@ static void start_get(int m) {
 }
 
 /* ---------------------------------------------------------------- the window */
-static const struct nk_color TEAL = { 0, 128, 128, 255 }, TEAL2 = { 0, 160, 160, 255 }, GOLD = { 230, 200, 110, 255 }, DIM = { 150, 150, 160, 255 };
+/* every text colour at least 4.5 : 1 against the ground it is drawn on (WCAG 2; --contrast in the self-test lists them).
+   TEAL2 is for lines and frames only; TEALT is teal for text. No red anywhere. (B1, 2026-11-22) */
+static const struct nk_color TEAL = { 0, 128, 128, 255 }, TEAL2 = { 0, 160, 160, 255 }, TEALH = { 0, 105, 105, 255 }, TEALT = { 60, 200, 200, 255 },
+                             GOLD = { 230, 200, 110, 255 }, DIM = { 165, 165, 175, 255 };
+static const struct nk_color MODEL_COL[6] = { { 120, 210, 200, 255 }, { 150, 190, 230, 255 }, { 230, 200, 110, 255 }, { 150, 215, 140, 255 }, { 190, 170, 235, 255 }, { 220, 220, 225, 255 } };
+static double lum(struct nk_color c) {
+    double v[3]; int i; v[0] = c.r / 255.0; v[1] = c.g / 255.0; v[2] = c.b / 255.0;
+    for (i = 0; i < 3; i++) v[i] = v[i] <= 0.03928 ? v[i] / 12.92 : pow((v[i] + 0.055) / 1.055, 2.4);
+    return 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2];
+}
+static double contrast(struct nk_color a, struct nk_color b) { double x = lum(a), y = lum(b); return x > y ? (x + 0.05) / (y + 0.05) : (y + 0.05) / (x + 0.05); }
+/* the self-test's --contrast: each text colour against each ground it is used on; the number below 4.5 : 1 */
+static int contrast_report(struct nk_context *ctx) {
+    struct { const char *what; struct nk_color fg, bg; } P[32]; int n = 0, i, low = 0;
+    struct nk_color win = ctx->style.window.fixed_background.data.color, btn = ctx->style.button.normal.data.color, cell = { 40, 42, 50, 255 };
+#define PAIR(w, f, b) do { P[n].what = w; P[n].fg = f; P[n].bg = b; n++; } while (0)
+    PAIR("text / window", ctx->style.text.color, win); PAIR("button text / button", ctx->style.button.text_normal, btn);
+    PAIR("GOLD / window", GOLD, win); PAIR("DIM / window", DIM, win); PAIR("DIM / button", DIM, btn); PAIR("DIM / cell", DIM, cell);
+    PAIR("TEALT / window", TEALT, win); PAIR("TEALT / cell", TEALT, cell); PAIR("GOLD / cell", GOLD, cell);
+    PAIR("white / main button", nk_rgb(255, 255, 255), TEAL); PAIR("white / main button hovered", nk_rgb(255, 255, 255), TEALH);
+    PAIR("light grey / window", nk_rgb(215, 215, 220), win);
+    for (i = 0; i < 6; i++) PAIR("a model's colour / window", MODEL_COL[i], win);
+#undef PAIR
+    for (i = 0; i < n; i++) { double c = contrast(P[i].fg, P[i].bg); low += c < 4.5;
+        vlog(c < 4.5 ? VLOG_WARN : VLOG_INFO, "contrast", "%-28s %d,%d,%d on %d,%d,%d: %.1f : 1%s", P[i].what, P[i].fg.r, P[i].fg.g, P[i].fg.b, P[i].bg.r, P[i].bg.g, P[i].bg.b, c, c < 4.5 ? "  BELOW 4.5" : ""); }
+    vlog(VLOG_INFO, "contrast", "%d pairs, %d below 4.5 : 1", n, low);
+    return low;
+}
 static int button(struct nk_context *ctx, const char *label, int main, int enabled) {
     int r;
     if (!enabled) nk_widget_disable_begin(ctx);
     if (main && enabled) {
         nk_style_push_style_item(ctx, &ctx->style.button.normal, nk_style_item_color(TEAL));
-        nk_style_push_style_item(ctx, &ctx->style.button.hover, nk_style_item_color(TEAL2));
+        nk_style_push_style_item(ctx, &ctx->style.button.hover, nk_style_item_color(TEALH));
         nk_style_push_color(ctx, &ctx->style.button.text_normal, nk_rgb(255, 255, 255));
     }
     r = nk_button_label(ctx, label);
@@ -2109,7 +2136,7 @@ static void compare_panel(struct nk_context *ctx, Shot *s) {
             nk_fill_rect(cv, nk_rect(b.x + 30, b.y, 96, 96), 0, nk_rgb(64, 68, 77));
             if (S.cmp_bm[j]) { struct nk_image im = nkimg(S.cmp_bm[j], S.cmp_w[j], S.cmp_h[j]);
                 nk_draw_image(cv, nk_rect(b.x + 30 + (96 - S.cmp_w[j]) / 2, b.y + (96 - S.cmp_h[j]) / 2, (float)S.cmp_w[j], (float)S.cmp_h[j]), &im, nk_rgb(255, 255, 255)); }
-            nk_draw_text(cv, nk_rect(b.x, b.y + 97, 156, 16), S.pname[j], (int)strlen(S.pname[j]), f, nk_rgb(45, 45, 45), j == now ? TEAL2 : GOLD);
+            nk_draw_text(cv, nk_rect(b.x, b.y + 97, 156, 16), S.pname[j], (int)strlen(S.pname[j]), f, nk_rgb(45, 45, 45), j == now ? TEALT : GOLD);
             nk_draw_text(cv, nk_rect(b.x, b.y + 113, 156, 16), S.cmp_score[j], (int)strlen(S.cmp_score[j]), f, nk_rgb(45, 45, 45), DIM);
             if (j == now) nk_stroke_rect(cv, nk_rect(b.x + 28, b.y - 2, 100, 100), 0, 2, TEAL2);
             if (nk_input_is_mouse_hovering_rect(&ctx->input, b)) nk_tooltip(ctx, S.cmp_score[j]);
@@ -2251,7 +2278,7 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
             }
         }
         nk_layout_row_dynamic(ctx, 20, 1);
-        if (S.keptinfo[0]) nk_label_colored(ctx, S.keptinfo, NK_TEXT_LEFT, TEAL2); else nk_label_colored(ctx, "Not kept yet", NK_TEXT_LEFT, DIM);
+        if (S.keptinfo[0]) nk_label_colored(ctx, S.keptinfo, NK_TEXT_LEFT, TEALT); else nk_label_colored(ctx, "Not kept yet", NK_TEXT_LEFT, DIM);
         if (S.desc_made) nk_ext_wrap_label(ctx, S.desc_word ? "What it is: made from the other, still says it lies tilted" : "What it is: made from the other, check it", GOLD, S.inl);
         else nk_label_colored(ctx, "What it is (goes into the prompt)", NK_TEXT_LEFT, GOLD);
         nk_layout_row_dynamic(ctx, 110, 1);
@@ -2276,7 +2303,7 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
             nk_ext_wrap_label(ctx, lab, GOLD, S.inl);
             for (j = 0; j < M->nlic; j++) {
                 static const int TW[] = { 0, 56 }; struct nk_rect lb; nk_ext_row(ctx, 22, 2, TW);
-                lb = nk_widget_bounds(ctx); nk_label_colored(ctx, M->licn[j], NK_TEXT_LEFT, strstr(M->licn[j], "Non-Commercial") ? GOLD : TEAL2);
+                lb = nk_widget_bounds(ctx); nk_label_colored(ctx, M->licn[j], NK_TEXT_LEFT, strstr(M->licn[j], "Non-Commercial") ? GOLD : TEALT);
                 if (nk_input_is_mouse_hovering_rect(&ctx->input, lb)) nk_tooltip(ctx, M->licu[j]);
                 if (button(ctx, "Read", 0, 1)) ShellExecuteA(S.wnd, "open", M->licu[j], NULL, NULL, SW_SHOWNORMAL);
             }
@@ -2299,7 +2326,7 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
             if (!M->ready && !dl && !S.show_get) continue;      /* the ones still to get: folded (the row below) */
             { static const int TW[] = { 0, 80, 80 }; nk_ext_row(ctx, 24, 3, TW); }
             bb = nk_widget_bounds(ctx);
-            nk_label_colored(ctx, M->name, NK_TEXT_LEFT, !M->ready ? DIM : M->n ? TEAL2 : nk_rgb(215, 215, 220));
+            nk_label_colored(ctx, M->name, NK_TEXT_LEFT, !M->ready ? DIM : M->n ? TEALT : nk_rgb(215, 215, 220));
             if (nk_input_is_mouse_hovering_rect(&ctx->input, bb)) nk_tooltip(ctx, M->note[0] ? M->note : M->name);
             if (M->ready) { if (busy) nk_widget_disable_begin(ctx); nk_property_int(ctx, "#n", 0, &M->n, 20, 1, 1); if (busy) nk_widget_disable_end(ctx); }
             else nk_spacing(ctx, 1);
@@ -2313,7 +2340,7 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
             if (button(ctx, lab, 0, 1)) S.show_get = !S.show_get;
         }
         EnterCriticalSection(&S.cs);
-        if (S.dl_busy || S.dl_msg[0]) nk_ext_wrap_label(ctx, S.dl_msg, S.dl_busy ? GOLD : TEAL2, S.inl);
+        if (S.dl_busy || S.dl_msg[0]) nk_ext_wrap_label(ctx, S.dl_msg, S.dl_busy ? GOLD : TEALT, S.inl);
         LeaveCriticalSection(&S.cs);
         if (S.need_token) {      /* a model behind a Hugging Face login: the token, shown as stars, kept by Windows */
             static char stars[256]; size_t ol = strlen(S.tok), nl; static const int TW[] = { 0, 70 };
@@ -2453,10 +2480,9 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
                     }
                 }
                 {   /* the model's name (cut with "..." when it is longer than the cell) and, under it, the seed whole (review 2, P2-3) */
-                    static const struct nk_color mc[] = { { 120, 210, 200, 255 }, { 150, 190, 230, 255 }, { 230, 200, 110, 255 }, { 150, 215, 140, 255 }, { 190, 170, 235, 255 }, { 220, 220, 225, 255 } };
                     char nm[64]; int len; snprintf(nm, sizeof nm, "%s", S.m[s->model].name); len = (int)strlen(nm);
                     while (len > 1 && f->width(f->userdata, f->height, nm, len) > 126) { len--; nm[len] = 0; if (len > 3) { nm[len - 1] = nm[len - 2] = nm[len - 3] = '.'; } }
-                    nk_draw_text(cv, nk_rect(b.x, b.y + 130, 128, 17), nm, len, f, nk_rgb(45, 45, 45), mc[s->model % 6]);
+                    nk_draw_text(cv, nk_rect(b.x, b.y + 130, 128, 17), nm, len, f, nk_rgb(45, 45, 45), MODEL_COL[s->model % 6]);
                     snprintf(t, sizeof t, "seed %u", s->seed);
                     nk_draw_text(cv, nk_rect(b.x, b.y + 147, 128, 17), t, (int)strlen(t), f, nk_rgb(45, 45, 45), DIM);
                     if (nk_input_is_mouse_hovering_rect(&ctx->input, nk_rect(b.x, b.y + 128, 128, 36))) { char tt[96]; snprintf(tt, sizeof tt, "%s, seed %u", S.m[s->model].name, s->seed); nk_tooltip(ctx, tt); }
@@ -2688,7 +2714,7 @@ static void empty_frame(struct nk_context *ctx, int W, int H) {   /* no sprites 
 }
 static int gui(int argc, char **argv) {
     const char *shot = NULL, *test_get = NULL; char *draws[2 * MAXM]; int ndraw = 0, drawn = 0; char *sets[64]; int nsets = 0;
-    int test_accept = 0; const char *test_from = NULL, *test_split = NULL; int TEV[48][4], ntev = 0, kev = 0;
+    int test_accept = 0, test_contrast = 0; const char *test_from = NULL, *test_split = NULL; int TEV[48][4], ntev = 0, kev = 0;
     int test_keep = 0, test_undo = 0, test_tab = -1, test_item = -1, test_redraw = -1, test_keys[8], ntest_keys = 0, test_clk[8][3], ntest_clk = 0; const char *test_find = NULL; int i, k, W = 1440, H = 940, running = 1, refresh = 1, frames = 0;
     WNDCLASSW wc; RECT rc; DWORD style = WS_OVERLAPPEDWINDOW; HDC dc; GdiFont *font; struct nk_context *ctx; char p[MAX_PATH], *t;
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION jl;
@@ -2709,6 +2735,7 @@ static int gui(int argc, char **argv) {
 #if SD_BUILT
             else if (!strcmp(argv[i], "--novulkan")) TEST_NOVK = 1;      /* acts as if vulkan-1.dll were missing */
 #endif
+            else if (!strcmp(argv[i], "--contrast")) test_contrast = 1;     /* each text colour against its ground, in the log */
             else if (!strcmp(argv[i], "--accept-licence")) test_accept = 1;     /* Accept and get, when the licence is asked */
             else if (!strcmp(argv[i], "--pick-folder") && i + 1 < argc) TEST_PICK = argv[++i];    /* the folder picker's answer, Choose pressed */
             else if (!strcmp(argv[i], "--split") && i + 1 < argc) test_split = argv[++i];        /* L,R: the side panels' widths, over pick.ini's */
@@ -2787,6 +2814,7 @@ static int gui(int argc, char **argv) {
         snprintf(g0, sizeof g0, "%s\\selftest-game\\data", WORK); snprintf(g1, sizeof g1, "%s\\selftest-game\\dist", WORK);
         GAMEDIRS[0] = g0; GAMEDIRS[1] = g1; N_GAME = 2; snprintf(GAMETAG[0], 16, "data"); snprintf(GAMETAG[1], 16, "dist");
     }
+    if (test_contrast) contrast_report(ctx);
     if (!S.empty) choose(S.pos);
     if (test_from) { int f; for (f = 0; f < 3; f++) if (!strcmp(test_from, FROM_NAMES[f]) && (f != FROM_UP || S.has_up)) { S.from = f; load_desc_text(S.item); } }
     if (test_find) { snprintf(S.find, sizeof S.find, "%s", test_find); first_fit(); }
