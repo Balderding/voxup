@@ -609,7 +609,7 @@ static struct {
     HBITMAP bm_orig, bm_tool, bm_up, pv_up, pv_draw, pv_small, pv_orig; int pv_for, pv_w, pv_h; LONG pv_gen;
     HBITMAP bm_mini;                            /* the original at 32 x 32, in each picture's corner */
     int undo_item, undo_had[4]; char undo_stamp[32];   /* the keep being undone: the item, which game pictures it replaced */
-    struct { int kind, item, had[4]; char stamp[32]; ShrinkOpt opt; } undo[64]; int nundo;   /* B5: 1 a keep, 2 the settings before a change */
+    struct { int kind, item, had[4], own; char stamp[32]; ShrinkOpt opt; } undo[64]; int nundo;   /* own: the item's own settings were changed */   /* B5: 1 a keep, 2 the settings before a change */
     char keptinfo[200];
     volatile LONG busy, stop; int drawing_round;
     CRITICAL_SECTION cs; char status[600];
@@ -1431,7 +1431,7 @@ static void sd_unload(void) { if (SDX) { sd_ctx_free(SDX); SDX = NULL; SDX_MODEL
 static int VK_STATE = -1, TEST_NOVK;
 static int vk_there(void) {
     if (VK_STATE < 0) {
-        HMODULE h = TEST_NOVK ? NULL : LoadLibraryA("vulkan-1.dll");
+        HMODULE h = TEST_NOVK ? NULL : LoadLibraryExA("vulkan-1.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);   /* System32 only (review 3, P3-7) */
         VK_STATE = h != NULL;
         if (!h) vlog(VLOG_WARN, "engine", "no Vulkan graphics driver (vulkan-1.dll%s): the built-in engine cannot draw; update the graphics driver (ComfyUI can still draw)", TEST_NOVK ? ", self-test --novulkan" : " not found");
     }
@@ -1663,7 +1663,7 @@ static void opt_check(void) {
             InterlockedIncrement(&S.optgen); kick_reshape(); if (S.own_opt) item_opt_save(S.item);
             if (!UNDOING && last_item == S.item && (GetTickCount() - last_t > 700 || !S.nundo || S.undo[S.nundo - 1].kind != 2)) {
                 int u; if (S.nundo == 64) { memmove(&S.undo[0], &S.undo[1], sizeof S.undo[0] * 63); S.nundo--; }
-                u = S.nundo++; S.undo[u].kind = 2; S.undo[u].item = S.item; S.undo[u].opt = last;     /* the settings from before */
+                u = S.nundo++; S.undo[u].kind = 2; S.undo[u].item = S.item; S.undo[u].opt = last; S.undo[u].own = S.own_opt;     /* the settings from before */
             }
             last_t = GetTickCount();
         }
@@ -1763,7 +1763,7 @@ static void undo_any(void) {
     if (S.undo[u].kind == 1) {
         S.undo_item = S.undo[u].item; memcpy(S.undo_had, S.undo[u].had, sizeof S.undo_had); snprintf(S.undo_stamp, sizeof S.undo_stamp, "%s", S.undo[u].stamp);
         undo_keep();
-    } else if (S.undo[u].item == S.item) {
+    } else if (S.undo[u].item == S.item || (!S.undo[u].own && !S.own_opt)) {     /* the common settings: from any item (review 3, P3-7) */
         char d[600]; S.opt = S.undo[u].opt; UNDOING = 1;
         shrink_describe(&S.opt, d, sizeof d); vlog(VLOG_INFO, "undo", "settings back to before: %s", d);
         status("Settings back to how they were (Ctrl+Z again goes further back).");
@@ -1772,6 +1772,7 @@ static void undo_any(void) {
 static const char *undo_what(char *b, size_t n) {
     if (!S.nundo) { b[0] = 0; return b; }
     if (S.undo[S.nundo - 1].kind == 1) snprintf(b, n, "Undo the keep of %03d (Ctrl+Z)", S.undo[S.nundo - 1].item);
+    else if (S.undo[S.nundo - 1].item != S.item && S.undo[S.nundo - 1].own) snprintf(b, n, "Undo %03d's own setting change (go to it)", S.undo[S.nundo - 1].item);
     else snprintf(b, n, "Undo the setting change (Ctrl+Z)");
     return b;
 }
@@ -1958,8 +1959,8 @@ static int hotkey(int vk) {
     switch (vk) {
     case VK_PRIOR: if (!busy) step_item(-1); return 1;
     case VK_NEXT: if (!busy) step_item(1); return 1;
-    case VK_LEFT: move_sel(-1, 0); return 1;
-    case VK_RIGHT: move_sel(1, 0); return 1;
+    case VK_LEFT: if (ctrl) fold_set(0, !S.fold[0]); else move_sel(-1, 0); return 1;      /* Ctrl+Left / Right: fold a side, any layout (review 3, P3-7) */
+    case VK_RIGHT: if (ctrl) fold_set(1, !S.fold[1]); else move_sel(1, 0); return 1;
     case VK_UP: move_sel(0, -1); return 1;
     case VK_DOWN: move_sel(0, 1); return 1;
     case VK_SPACE: if (!busy) start_round(); return 1;
@@ -2738,7 +2739,8 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
             if (nk_input_is_mouse_click_down_in_rect(&ctx->input, NK_BUTTON_LEFT, pb, nk_true)) {
                 unsigned hsh = 5381; const char *c;
                 for (c = S.problem; *c; c++) hsh = hsh * 33 + (unsigned char)*c;
-                if (S.nprob_gone < 32) S.prob_gone[S.nprob_gone++] = hsh;
+                if (S.nprob_gone == 32) { memmove(S.prob_gone, S.prob_gone + 1, sizeof S.prob_gone[0] * 31); S.nprob_gone--; }   /* the oldest goes */
+                S.prob_gone[S.nprob_gone++] = hsh;
                 S.problem[0] = 0; S.prob_gap = pb.h; S.prob_rect = pb;        /* its room stays while the mouse is on it */
             }
             if (S.problem[0] && nk_input_is_mouse_hovering_rect(&ctx->input, pb)) nk_ext_tooltip(ctx, S.problem);
@@ -2797,7 +2799,7 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
             if (nk_input_is_mouse_click_down_in_rect(&ctx->input, NK_BUTTON_LEFT, kb, nk_true)) S.keys_open = !S.keys_open;
             if (S.keys_open) {
                 nk_ext_wrap_label(ctx, "Click: look at it   Double-click / Enter: keep   Right-click / Del: draw that one again   Space / Ctrl+Enter: draw   Esc: stop", DIM, S.ing);
-                nk_ext_wrap_label(ctx, "Arrows: choose   PgUp/PgDn: item   Home/End: round   Ctrl+Z: undo   Ctrl+F: find   Q / R: queue / run it   1 2 3: panels   Ctrl+[ Ctrl+]: fold a side   F1..: presets", DIM, S.ing);
+                nk_ext_wrap_label(ctx, "Arrows: choose   PgUp/PgDn: item   Home/End: round   Ctrl+Z: undo   Ctrl+F: find   Q / R: queue / run it   1 2 3: panels   Ctrl+Left / Ctrl+Right (or Ctrl+[ ]): fold a side   F1..: presets", DIM, S.ing);
             }
         }
         for (r = 0; R && r * S.per < R->n; r++) {
@@ -3029,7 +3031,7 @@ static void ini_first(void) {
     if (exists(p)) return;
     snprintf(t, sizeof t,
         "# voxup.ini: made by voxup on its first start. Lines are \"key = value\"; # starts a comment.\r\n"
-        "# Every key is explained in voxup.ini.example (in voxup's source).\r\n"
+        "# Every key: https://github.com/Balderding/voxup/blob/main/voxup.ini.example (also names =, desc =, comfy =).\r\n"
         "\r\n"
         "# the original sprites, NNN.png (000.png, 001.png ...): voxup asks for this folder\r\n"
         "sprites =\r\n"
@@ -3062,8 +3064,20 @@ static void choose_palette(void) {     /* Windows' own file dialog; the choice i
     snprintf(P_PALETTE, MAX_PATH, "%s", f); ini_set("palette", f); status("Palette: %s", f);
 }
 static void choose_sprites(void) {
-    char d[MAX_PATH];
+    char d[MAX_PATH]; const unsigned char *c;
     if (!pick_folder(d, sizeof d)) return;
+    for (c = (const unsigned char *)d; *c && *c < 128; c++) ;
+    if (*c) {   /* the picker gives UTF-8; the files are read with plain (ANSI) names: the folder's short name (review 3, P3-7) */
+        wchar_t w[MAX_PATH], sh[MAX_PATH]; char a[MAX_PATH]; const unsigned char *q;
+        MultiByteToWideChar(CP_UTF8, 0, d, -1, w, MAX_PATH);
+        if (GetShortPathNameW(w, sh, MAX_PATH) && WideCharToMultiByte(CP_ACP, 0, sh, -1, a, sizeof a, NULL, NULL)) {
+            for (q = (const unsigned char *)a; *q && *q < 128 && *q != '?'; q++) ;
+            if (!*q) { vlog(VLOG_INFO, "pick", "%s is read as %s (its short name)", d, a); snprintf(d, sizeof d, "%s", a); }
+        }
+        for (c = (const unsigned char *)d; *c && *c < 128; c++) ;
+        if (*c) { snprintf(S.empty_msg, sizeof S.empty_msg, "%s has letters voxup cannot read file names with: rename the folder with plain letters (A-Z, 0-9), or copy the sprites to such a folder.", d);
+            vlog(VLOG_WARN, "pick", "%s: not plain letters and no short name", d); return; }
+    }
     snprintf(P_SPRITES, MAX_PATH, "%s", d); scan_items();
     if (!S.nlist) { snprintf(S.empty_msg, sizeof S.empty_msg, "%s holds no 16 x 16 pictures named 000.png, 001.png ...: choose another folder.", d);
         vlog(VLOG_WARN, "pick", "%s holds no 16 x 16 NNN.png pictures", d); return; }
