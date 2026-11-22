@@ -270,7 +270,10 @@ static Span *spans(int insz, int outsz) {
 }
 static void straight(float *const pl[4], size_t k, double *c) { double a = pl[3][k]; int j; for (j = 0; j < 3; j++) c[j] = a > 0 ? pl[j][k] * 255.0 / a : 0; }
 
-static void m_cells(float *const pl[4], int cw, int ch, int w, int h, int method, float *rs[4]) {
+/* majority (review A7): each pixel votes for the original's colour it is nearest to (weighted RGB), pixels near the
+   cell's centre a little more (1 to 2); the cell takes the mean of the winning colour's pixels. With no palette, the
+   commonest of 32 levels a channel, as before. pal: np RGB triples */
+static void m_cells(float *const pl[4], int cw, int ch, int w, int h, int method, float *rs[4], const unsigned char *pal, int np) {
     Span *sx = spans(cw, w), *sy = spans(ch, h); int x, y, u, v, j;
     float *buf = xm(sizeof(float) * 3 * (size_t)(sx[0].x1 - sx[0].x0 + 2) * (size_t)(cw / w + 3) * (size_t)(ch / h + 3));
     unsigned *keys = xm(sizeof(unsigned) * (size_t)(cw / w + 3) * (size_t)(ch / h + 3));
@@ -291,6 +294,24 @@ static void m_cells(float *const pl[4], int cw, int ch, int w, int h, int method
             float *t = xm(sizeof(float) * (size_t)n);
             for (j = 0; j < 3; j++) { int i; for (i = 0; i < n; i++) t[i] = buf[(size_t)i * 3 + j]; qsort(t, (size_t)n, sizeof(float), cmp_f); rs[j][o] = t[n / 2] * rs[3][o] / 255.0f; }
             free(t);
+        } else if (np > 0) {
+            double vote[256], m[3] = { 0, 0, 0 }, cxm = (sx[x].x0 + sx[x].x1 - 1) / 2.0, cym = (sy[y].x0 + sy[y].x1 - 1) / 2.0;
+            double rx = (sx[x].x1 - sx[x].x0) / 2.0 + 0.5, ry = (sy[y].x1 - sy[y].x0) / 2.0 + 0.5; int i, best = 0, bc = 0, q;
+            for (q = 0; q < np; q++) vote[q] = 0;
+            i = 0;
+            for (v = sy[y].x0; v < sy[y].x1; v++) for (u = sx[x].x0; u < sx[x].x1; u++) {
+                size_t k = (size_t)v * cw + u; double dx, dy, dd, bd = 1e30;
+                if (pl[3][k] < 128) continue;
+                for (q = 0; q < np; q++) {
+                    double dr = buf[(size_t)i * 3] - pal[q * 3], dg = buf[(size_t)i * 3 + 1] - pal[q * 3 + 1], db = buf[(size_t)i * 3 + 2] - pal[q * 3 + 2];
+                    dd = 2 * dr * dr + 4 * dg * dg + 3 * db * db; if (dd < bd) { bd = dd; keys[i] = (unsigned)q; }
+                }
+                dx = (u - cxm) / rx; dy = (v - cym) / ry; dd = sqrt(dx * dx + dy * dy); if (dd > 1) dd = 1;
+                vote[keys[i]] += 2.0 - dd; i++;
+            }
+            for (q = 1; q < np; q++) if (vote[q] > vote[best]) best = q;
+            for (i = 0; i < n; i++) if (keys[i] == (unsigned)best) { for (j = 0; j < 3; j++) m[j] += buf[(size_t)i * 3 + j]; bc++; }
+            for (j = 0; j < 3; j++) rs[j][o] = (float)(m[j] / (bc ? bc : 1) * rs[3][o] / 255.0);
         } else {             /* majority: the commonest colour, 32 levels a channel; its pixels' mean */
             int i, best = 0, bc = 0; double m[3] = { 0, 0, 0 };
             for (i = 0; i < n; i++) keys[i] = ((unsigned)buf[i * 3] >> 3) << 10 | ((unsigned)buf[i * 3 + 1] >> 3) << 5 | ((unsigned)buf[i * 3 + 2] >> 3);
@@ -534,7 +555,7 @@ int shrink(const unsigned char *drw, int dw, int dh, const unsigned char *orig, 
     bw = x1 - x0; bh = y1 - y0;
     {
         double s = (double)bw / cw < (double)bh / chh ? (double)bw / cw : (double)bh / chh;
-        float *pl[4], *rs[4]; unsigned char *crop, *sil = NULL; int lin;
+        float *pl[4], *rs[4]; unsigned char *crop, *sil = NULL, pal[256 * 3]; int lin, npal = 0;
         if (o->fit == FIT_STRETCH) { w = bw; h = bh; }
         else { w = (int)nearbyint(cw * s); if (w < 1) w = 1; h = (int)nearbyint(chh * s); if (h < 1) h = 1; }
         crop = xm((size_t)cw * chh * 4);
@@ -546,12 +567,18 @@ int shrink(const unsigned char *drw, int dw, int dh, const unsigned char *orig, 
         lin = o->linear && o->method != M_SUPERPIXEL;     /* superpixels measure in Lab from sRGB themselves */
         for (i = 0; i < cw * chh; i++) { double a = crop[i * 4 + 3]; for (c = 0; c < 3; c++) pl[c][i] = (float)((lin ? lin_t[crop[i * 4 + c]] * 255.0 : crop[i * 4 + c]) * (a / 255)); pl[3][i] = (float)a; }
         free(crop);
-        /* 4. the method */
+        /* 4. the method (majority and 2-step vote over the original's own colours) */
+        {   int q;
+            for (i = 0; i < ow * oh && npal < 256; i++) if (orig[i * 4 + 3] >= 128) {
+                for (q = 0; q < npal && memcmp(pal + q * 3, orig + i * 4, 3); q++) ;
+                if (q == npal) { memcpy(pal + npal * 3, orig + i * 4, 3); npal++; }
+            }
+        }
         if (o->method == M_TWOSTEP) {         /* Lanczos to 4x, then the commonest colour 4x -> 2x -> 1x */
             float *a4[4], *a2[4];
             for (c = 0; c < 4; c++) { a4[c] = resize_k(pl[c], cw, chh, w * 4, h * 4, k_lanczos, 3.0); a2[c] = xm(sizeof(float) * (size_t)w * h * 4); rs[c] = xm(sizeof(float) * (size_t)w * h); }
-            m_cells(a4, w * 4, h * 4, w * 2, h * 2, M_MAJORITY, a2);
-            m_cells(a2, w * 2, h * 2, w, h, M_MAJORITY, rs);
+            m_cells(a4, w * 4, h * 4, w * 2, h * 2, M_MAJORITY, a2, pal, npal);
+            m_cells(a2, w * 2, h * 2, w, h, M_MAJORITY, rs, pal, npal);
             for (c = 0; c < 4; c++) { free(a4[c]); free(a2[c]); }
         } else if (o->method <= M_GAUSS && o->method != M_NEAREST) {
             KernFn f = o->method == M_BOX ? k_box : o->method == M_BILINEAR ? k_tri : o->method == M_BICUBIC ? k_cubic : o->method == M_MITCHELL ? k_mitchell : o->method == M_GAUSS ? k_gauss : k_lanczos;
@@ -562,7 +589,7 @@ int shrink(const unsigned char *drw, int dw, int dh, const unsigned char *orig, 
             if (o->method == M_DPID) m_dpid(pl, cw, chh, w, h, o->dpid_lambda / 100.0, rs);
             else if (o->method == M_SAID) m_said(pl, cw, chh, w, h, o, rs);
             else if (o->method == M_SUPERPIXEL) m_superpixel(pl, cw, chh, w, h, o, rs);
-            else m_cells(pl, cw, chh, w, h, o->method, rs);
+            else m_cells(pl, cw, chh, w, h, o->method, rs, pal, npal);
         }
         for (c = 0; c < 4; c++) free(pl[c]);
         if (o->silhouette) {      /* the shape on its own: half covered, or a thin line (covered more than both
