@@ -368,6 +368,44 @@ static int upright_cli(int argc, char **argv) {
     if (!ok) { vlog(VLOG_ERR, "upright", "could not write %s", argv[3]); return 1; }
     return 0;
 }
+/* voxup --shrinkall SEEDSDIR OUTDIR [key=value ...]: every drawing there (SEEDSDIR\NNN\MODEL-sSEED.png) shrunk with
+   those settings into OUTDIR\NNN-MODEL-sSEED.png, for measuring settings against each other (B7) */
+static int shrinkall_cli(int argc, char **argv) {
+    WIN32_FIND_DATAA fd, fi; HANDLE h, hi; char pat[MAX_PATH]; int total = 0, i; ShrinkOpt so;
+    if (argc < 4) { fprintf(stderr, "voxup --shrinkall SEEDSDIR OUTDIR [key=value ...]\n"); return 255; }
+    shrink_defaults(&so);
+    for (i = 4; i < argc; i++) { char k[40]; int v; if (sscanf(argv[i], "%39[^=]=%d", k, &v) != 2 || !shrink_set(&so, k, v)) { vlog(VLOG_ERR, "shrink", "not a setting: %s", argv[i]); return 255; } }
+    mkdirs(argv[3]);
+    snprintf(pat, sizeof pat, "%s\\*", argv[2]);
+    if ((h = FindFirstFileA(pat, &fd)) == INVALID_HANDLE_VALUE) { vlog(VLOG_ERR, "check", "nothing in %s", argv[2]); return 1; }
+    do {
+        char sp[MAX_PATH]; int ow, oh, item; unsigned char *orig;
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !isdigit((unsigned char)fd.cFileName[0])) continue;
+        item = atoi(fd.cFileName); snprintf(sp, sizeof sp, "%s\\%03d.png", P_SPRITES, item);
+        if (!(orig = load_rgba(sp, &ow, &oh))) continue;
+        snprintf(pat, sizeof pat, "%s\\%s\\*-s*.png", argv[2], fd.cFileName);
+        if ((hi = FindFirstFileA(pat, &fi)) != INVALID_HANDLE_VALUE) {
+            do {
+                char p[MAX_PATH], op[MAX_PATH]; int dw, dh, n, W, H; unsigned char *d, b[128 * 128 * 4];
+                if (strstr(fi.cFileName, "-32")) continue;
+                snprintf(p, sizeof p, "%s\\%s\\%s", argv[2], fd.cFileName, fi.cFileName);
+                if (!(d = stbi_load(p, &dw, &dh, &n, 3))) continue;
+                memset(b, 0, sizeof b);
+                if (shrink(d, dw, dh, orig, ow, oh, &so, b)) {
+                    shrink_size(&so, ow, oh, &W, &H);
+                    snprintf(op, sizeof op, "%s\\%03d-%s", argv[3], item, fi.cFileName);
+                    if (stbi_write_png(op, W, H, 4, b, W * 4)) total++;
+                }
+                stbi_image_free(d);
+            } while (FindNextFileA(hi, &fi));
+            FindClose(hi);
+        }
+        stbi_image_free(orig);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    printf("%d sprites written to %s\n", total, argv[3]);
+    return 0;
+}
 /* voxup --shrinkcheck SEEDSDIR: shrink.c with its defaults against to32 (both colour ways) on every drawing there */
 static int shrinkcheck_cli(int argc, char **argv) {
     WIN32_FIND_DATAA fd, fi; HANDLE h, hi; char pat[MAX_PATH]; int total = 0, bad = 0;
@@ -2085,7 +2123,7 @@ static void s_note(struct nk_context *ctx, const char *t) { nk_ext_wrap_label(ct
 static void settings_panel(struct nk_context *ctx) {
     static const char *const SIZE[] = { "16 x 16", "32 x 32", "Any size (type it)" }, *const FIT[] = { "The original's box", "The whole sprite", "Stretched to fill" };
     static const char *const SMOOTH[] = { "None", "Median 3 x 3", "Bilateral (keeps edges)" };
-    static const char *const COL[] = { "The original's", "Original's + shades", "The model's own", "Model's own, as drawn", "N found (k-means)", "N found (median cut)" };
+    static const char *const COL[] = { "The original's", "Original's + shades", "The model's own", "Model's own, as drawn", "N found (k-means)", "N found (median cut)", "N found (Wu)" };
     static const char *const DIST[] = { "RGB", "Lab (as seen)", "Weighted RGB" }, *const DITH[] = { "None", "Floyd-Steinberg", "Atkinson", "Ordered (Bayer 4x4)" };
     static const char *const LINE[] = { "Take it off", "Leave it" }, *const OUTL[] = { "None", "Black", "Black, corners too", "Selective (darker shade)", "Auto (as the original)" };
     static const char *const EDGE[] = { "Rough (as shrunk)", "Smooth (whole pixels)" };
@@ -2141,8 +2179,9 @@ static void settings_panel(struct nk_context *ctx) {
     s_int(ctx, "Fill pinholes", &o->pinholes, 0, 3, 1);
     }
     if (s_section(ctx, "Colours", 4)) {
-    s_combo(ctx, "Colours", COL, 6, &o->colours);
-    if (o->colours == C_KMEANS || o->colours == C_MEDIANCUT) s_int(ctx, "How many", &o->ncol, 2, 32, 1);
+    s_combo(ctx, "Colours", COL, 7, &o->colours);
+    if (o->colours == C_KMEANS || o->colours == C_MEDIANCUT || o->colours == C_WU) s_int(ctx, "How many", &o->ncol, 2, 32, 1);
+    if (o->colours == C_KMEANS) s_check(ctx, "k-means++ seeds", &o->kmpp);
     if (o->colours != C_OWN && o->colours != C_ASDRAWN) {
         s_combo(ctx, "Nearest by", DIST, 3, &o->dist);
         s_combo(ctx, "Dithering", DITH, 4, &o->dither);
@@ -2157,6 +2196,7 @@ static void settings_panel(struct nk_context *ctx) {
     if (line == 1) o->peel = 0; else { if (!o->peel) o->peel = 4; s_int(ctx, "Layers taken off", &o->peel, 1, 4, 1); }
     }
     if (s_section(ctx, "Clean-up", 6)) {
+    s_check(ctx, "Specks on the edge go (6 of 8 around empty)", &o->edgestray);
     s_check(ctx, "Lone pixels take their neighbours' colour", &o->orphans);
     s_check(ctx, "Doubled corners in lines off", &o->jaggies);
     }
@@ -3068,6 +3108,7 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[1], "--to32")) { vlog_open(NULL, 0); vlog_echo(1); r = to32_cli(argc, argv); vlog_close(); return r; }
         if (!strcmp(argv[1], "--shrink")) { vlog_open(NULL, 0); vlog_echo(1); r = shrink_cli(argc, argv); vlog_close(); return r; }
         if (!strcmp(argv[1], "--upright")) { vlog_open(NULL, 0); vlog_echo(1); r = upright_cli(argc, argv); vlog_close(); return r; }
+        if (!strcmp(argv[1], "--shrinkall")) { vlog_open(NULL, 0); vlog_echo(1); r = shrinkall_cli(argc, argv); vlog_close(); return r; }
         if (!strcmp(argv[1], "--shrinkcheck")) { vlog_open(NULL, 0); vlog_echo(1); r = shrinkcheck_cli(argc, argv); vlog_close(); return r; }
         return voxup_cli(argc, argv);
     }

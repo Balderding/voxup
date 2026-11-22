@@ -21,7 +21,7 @@ enum { FIT_BOX, FIT_FILL, FIT_STRETCH };
 enum { SM_NONE, SM_MEDIAN, SM_BILATERAL };
 enum { M_LANCZOS, M_NEAREST, M_BOX, M_BILINEAR, M_BICUBIC, M_MITCHELL, M_GAUSS, M_MEDIAN, M_MAJORITY, M_DPID, M_SAID, M_SUPERPIXEL,
        M_TWOSTEP, M_GRID, M_COUNT };
-enum { C_ORIGINAL, C_SHADES, C_OWN, C_ASDRAWN, C_KMEANS, C_MEDIANCUT };
+enum { C_ORIGINAL, C_SHADES, C_OWN, C_ASDRAWN, C_KMEANS, C_MEDIANCUT, C_WU };
 enum { D_RGB, D_LAB, D_REDMEAN };
 enum { DI_NONE, DI_FLOYD, DI_ATKINSON, DI_BAYER };
 enum { O_NONE, O_BLACK4, O_BLACK8, O_SELECTIVE, O_AUTO };   /* O_AUTO: black only when the original has an outline */
@@ -42,6 +42,7 @@ typedef struct {
     int pink;                      /* model's own colours: pink-tinted pixels (the background bleeding in) still snapped */
     int peel;                      /* rim layers peeled, 0..4 */
     int orphans, jaggies;          /* lone pixels taken by their neighbours; doubled outline corners removed */
+    int edgestray, kmpp;           /* B7: an edge pixel with 6+ of its 8 neighbours empty goes; k-means++ seeds (else farthest-first) */
     int outline;                   /* O_* */
     int othick;                    /* the outline's thickness, 1..4 pixels (1 standard) */
     int edge;                      /* without an outline: 0 rough (as shrunk), 1 smooth (the silhouette's steps evened

@@ -57,13 +57,13 @@ static const Key KEYS[] = {
     K(contrast, -100, 100), K(brightness, -100, 100), K(saturation, -100, 100), K(smooth, 0, 2), K(sharpen, 0, 300),
     K(method, 0, M_COUNT - 1), K(dpid_lambda, 0, 300), K(said_gamma, 0, 400), K(said_alpha, 0, 200), K(said_beta, 0, 200),
     K(sp_m, 1, 100), K(sp_iter, 1, 30),
-    K(pinholes, 0, 3), K(colours, 0, 5), K(ncol, 2, 32), K(dist, 0, 2), K(dither, 0, 3), K(dither_amt, 0, 100),
-    K(black, 0, 128), K(pink, 0, 100), K(peel, 0, 4), K(orphans, 0, 1), K(jaggies, 0, 1), K(outline, 0, 4), K(othick, 1, 4), K(edge, 0, 1),
+    K(pinholes, 0, 3), K(colours, 0, 6), K(ncol, 2, 32), K(dist, 0, 2), K(dither, 0, 3), K(dither_amt, 0, 100),
+    K(black, 0, 128), K(pink, 0, 100), K(peel, 0, 4), K(orphans, 0, 1), K(jaggies, 0, 1), K(edgestray, 0, 1), K(kmpp, 0, 1), K(outline, 0, 4), K(othick, 1, 4), K(edge, 0, 1),
     K(flood, 0, 1), K(linear, 0, 1), K(silhouette, 0, 1), K(regions, 0, 1), K(notch, 0, 1), K(blocks, 0, 1),
 };
 const char *const SHRINK_KEYS[] = { "size", "cw", "ch", "fit", "margin", "bg_dist", "magenta", "alpha_cut", "contrast", "brightness",
     "saturation", "smooth", "sharpen", "method", "dpid_lambda", "said_gamma", "said_alpha", "said_beta", "sp_m", "sp_iter",
-    "pinholes", "colours", "ncol", "dist", "dither", "dither_amt", "black", "pink", "peel", "orphans", "jaggies", "outline", "othick", "edge",
+    "pinholes", "colours", "ncol", "dist", "dither", "dither_amt", "black", "pink", "peel", "orphans", "jaggies", "edgestray", "kmpp", "outline", "othick", "edge",
     "flood", "linear", "silhouette", "regions", "notch", "blocks", NULL };
 int shrink_set(ShrinkOpt *o, const char *key, int v) {
     size_t i;
@@ -534,11 +534,23 @@ static void m_superpixel(float *const pl[4], int cw, int ch, int w, int h, const
 }
 
 /* ---------------------------------------------------------------- stage 6: palettes */
-static int kmeans(const unsigned char *px, int W, int H, int N, int (*pal)[3], int dmode) {
+static int kmeans(const unsigned char *px, int W, int H, int N, int (*pal)[3], int dmode, int pp) {
     int n = 0, i, j, k, it; double (*pts)[3] = xm(sizeof(double[3]) * (size_t)W * H), (*c)[3] = xm(sizeof(double[3]) * (size_t)N), (*cl)[3] = xm(sizeof(double[3]) * (size_t)N), (*lp)[3];
     for (i = 0; i < W * H; i++) { const unsigned char *p = px + (size_t)i * 4; if (p[3] >= 128 && (p[0] | p[1] | p[2])) { pts[n][0] = p[0]; pts[n][1] = p[1]; pts[n][2] = p[2]; n++; } }
     if (!n) { free(pts); free(c); free(cl); return 0; }
     lp = xm(sizeof(double[3]) * (size_t)n); for (i = 0; i < n; i++) lab(pts[i][0], pts[i][1], pts[i][2], lp[i]);
+    if (pp) {   /* k-means++ (Arthur & Vassilvitskii 2007): each seed drawn with odds by its squared distance to the nearest
+                   seed so far; a fixed-seed generator, so the same sprite still gives the same palette (B7) */
+        unsigned st = 2463534242u; double *dd = xm(sizeof(double) * (size_t)n), tot;
+        #define RNDU() (st ^= st << 13, st ^= st >> 17, st ^= st << 5, (st & 0xffffff) / 16777216.0)
+        i = (int)(RNDU() * n); for (j = 0; j < 3; j++) c[0][j] = pts[i][j];
+        for (k = 1; k < N; k++) { double r;
+            for (tot = 0, i = 0; i < n; i++) { double d = 1e300; int q; for (q = 0; q < k; q++) { double e = (pts[i][0] - c[q][0]) * (pts[i][0] - c[q][0]) + (pts[i][1] - c[q][1]) * (pts[i][1] - c[q][1]) + (pts[i][2] - c[q][2]) * (pts[i][2] - c[q][2]); if (e < d) d = e; } dd[i] = d; tot += d; }
+            r = RNDU() * tot; for (i = 0; i < n - 1 && (r -= dd[i]) > 0; i++) ;
+            for (j = 0; j < 3; j++) c[k][j] = pts[i][j]; }
+        #undef RNDU
+        free(dd);
+    } else
     /* farthest-first seeds from the mean (no randomness: the same sprite gives the same palette) */
     { double m[3] = { 0, 0, 0 }; for (i = 0; i < n; i++) for (j = 0; j < 3; j++) m[j] += pts[i][j] / n;
       for (k = 0; k < N; k++) { int best = 0; double bd = -1;
@@ -559,6 +571,85 @@ static int kmeans(const unsigned char *px, int W, int H, int N, int (*pal)[3], i
     free(pts); free(c); free(cl); free(lp);
     return N < n ? N : n;
 }
+/* Wu's colour quantizer (Xiaolin Wu, "Efficient Statistical Computations for Optimal Color Quantization", Graphics
+   Gems II, 1991), written here from the paper's method: a 33^3 histogram of 5-bit colours with cumulative moments; the
+   box with the most variance is cut where the two halves' summed variance drops most, until N boxes; each box's mean
+   is a palette colour. Opaque, non-black pixels only (as k-means). */
+enum { WU_R, WU_G, WU_B };
+#define WI(r, g, b) ((r) * 33 * 33 + (g) * 33 + (b))
+typedef struct { int r0, r1, g0, g1, b0, b1, vol; } WuBox;
+static double wu_vol(const WuBox *c, const double *m) {
+    return m[WI(c->r1, c->g1, c->b1)] - m[WI(c->r1, c->g1, c->b0)] - m[WI(c->r1, c->g0, c->b1)] + m[WI(c->r1, c->g0, c->b0)]
+         - m[WI(c->r0, c->g1, c->b1)] + m[WI(c->r0, c->g1, c->b0)] + m[WI(c->r0, c->g0, c->b1)] - m[WI(c->r0, c->g0, c->b0)];
+}
+static double wu_bottom(const WuBox *c, int dir, const double *m) {
+    if (dir == WU_R) return -m[WI(c->r0, c->g1, c->b1)] + m[WI(c->r0, c->g1, c->b0)] + m[WI(c->r0, c->g0, c->b1)] - m[WI(c->r0, c->g0, c->b0)];
+    if (dir == WU_G) return -m[WI(c->r1, c->g0, c->b1)] + m[WI(c->r1, c->g0, c->b0)] + m[WI(c->r0, c->g0, c->b1)] - m[WI(c->r0, c->g0, c->b0)];
+    return -m[WI(c->r1, c->g1, c->b0)] + m[WI(c->r1, c->g0, c->b0)] + m[WI(c->r0, c->g1, c->b0)] - m[WI(c->r0, c->g0, c->b0)];
+}
+static double wu_top(const WuBox *c, int dir, int pos, const double *m) {
+    if (dir == WU_R) return m[WI(pos, c->g1, c->b1)] - m[WI(pos, c->g1, c->b0)] - m[WI(pos, c->g0, c->b1)] + m[WI(pos, c->g0, c->b0)];
+    if (dir == WU_G) return m[WI(c->r1, pos, c->b1)] - m[WI(c->r1, pos, c->b0)] - m[WI(c->r0, pos, c->b1)] + m[WI(c->r0, pos, c->b0)];
+    return m[WI(c->r1, c->g1, pos)] - m[WI(c->r1, c->g0, pos)] - m[WI(c->r0, c->g1, pos)] + m[WI(c->r0, c->g0, pos)];
+}
+static double wu_var(const WuBox *c, double *const M[5]) {
+    double dr = wu_vol(c, M[1]), dg = wu_vol(c, M[2]), db = wu_vol(c, M[3]), w = wu_vol(c, M[0]);
+    return w > 0 ? wu_vol(c, M[4]) - (dr * dr + dg * dg + db * db) / w : 0;
+}
+static double wu_max(const WuBox *c, int dir, int first, int last, int *cut, double wr, double wg, double wb, double ww, double *const M[5]) {
+    double br = wu_bottom(c, dir, M[1]), bg = wu_bottom(c, dir, M[2]), bb = wu_bottom(c, dir, M[3]), bw = wu_bottom(c, dir, M[0]), best = 0; int i;
+    *cut = -1;
+    for (i = first; i < last; i++) {
+        double hr = br + wu_top(c, dir, i, M[1]), hg = bg + wu_top(c, dir, i, M[2]), hb = bb + wu_top(c, dir, i, M[3]), hw = bw + wu_top(c, dir, i, M[0]), t;
+        if (hw <= 0) continue;
+        t = (hr * hr + hg * hg + hb * hb) / hw;
+        hr = wr - hr; hg = wg - hg; hb = wb - hb; hw = ww - hw;
+        if (hw <= 0) continue;
+        t += (hr * hr + hg * hg + hb * hb) / hw;
+        if (t > best) { best = t; *cut = i; }
+    }
+    return best;
+}
+static int wu_cut(WuBox *a, WuBox *b, double *const M[5]) {
+    double wr = wu_vol(a, M[1]), wg = wu_vol(a, M[2]), wb = wu_vol(a, M[3]), ww = wu_vol(a, M[0]), mr, mg, mb; int cr, cg, cb, dir;
+    mr = wu_max(a, WU_R, a->r0 + 1, a->r1, &cr, wr, wg, wb, ww, M);
+    mg = wu_max(a, WU_G, a->g0 + 1, a->g1, &cg, wr, wg, wb, ww, M);
+    mb = wu_max(a, WU_B, a->b0 + 1, a->b1, &cb, wr, wg, wb, ww, M);
+    if (mr >= mg && mr >= mb) { dir = WU_R; if (cr < 0) return 0; } else if (mg >= mr && mg >= mb) dir = WU_G; else dir = WU_B;
+    b->r1 = a->r1; b->g1 = a->g1; b->b1 = a->b1;
+    if (dir == WU_R) { b->r0 = a->r1 = cr; b->g0 = a->g0; b->b0 = a->b0; }
+    else if (dir == WU_G) { b->g0 = a->g1 = cg; b->r0 = a->r0; b->b0 = a->b0; }
+    else { b->b0 = a->b1 = cb; b->r0 = a->r0; b->g0 = a->g0; }
+    a->vol = (a->r1 - a->r0) * (a->g1 - a->g0) * (a->b1 - a->b0); b->vol = (b->r1 - b->r0) * (b->g1 - b->g0) * (b->b1 - b->b0);
+    return 1;
+}
+static int wu(const unsigned char *px, int W, int H, int N, int (*pal)[3]) {
+    double *M[5]; WuBox box[256]; double vv[256]; int i, r, g, b, k, next = 0, n = 0, K = N;
+    for (i = 0; i < 5; i++) M[i] = calloc(33 * 33 * 33, sizeof(double));
+    for (i = 0; i < W * H; i++) { const unsigned char *p = px + (size_t)i * 4; int q;
+        if (p[3] < 128 || !(p[0] | p[1] | p[2])) continue;
+        q = WI((p[0] >> 3) + 1, (p[1] >> 3) + 1, (p[2] >> 3) + 1); n++;
+        M[0][q] += 1; M[1][q] += p[0]; M[2][q] += p[1]; M[3][q] += p[2]; M[4][q] += (double)p[0] * p[0] + (double)p[1] * p[1] + (double)p[2] * p[2]; }
+    if (!n) { for (i = 0; i < 5; i++) free(M[i]); return 0; }
+    for (r = 1; r <= 32; r++) {         /* the moments summed: each cell holds all from (0,0,0) to it */
+        double area[5][33]; memset(area, 0, sizeof area);
+        for (g = 1; g <= 32; g++) { double line[5] = { 0, 0, 0, 0, 0 };
+            for (b = 1; b <= 32; b++) { int q = WI(r, g, b);
+                for (i = 0; i < 5; i++) { line[i] += M[i][q]; area[i][b] += line[i]; M[i][q] = M[i][WI(r - 1, g, b)] + area[i][b]; } } }
+    }
+    if (K > 256) K = 256;
+    box[0].r0 = box[0].g0 = box[0].b0 = 0; box[0].r1 = box[0].g1 = box[0].b1 = 32;
+    for (i = 1; i < K; i++) {
+        if (wu_cut(&box[next], &box[i], M)) { vv[next] = box[next].vol > 1 ? wu_var(&box[next], M) : 0; vv[i] = box[i].vol > 1 ? wu_var(&box[i], M) : 0; }
+        else { vv[next] = 0; i--; }
+        next = 0; { double t = vv[0]; for (k = 1; k <= i; k++) if (vv[k] > t) { t = vv[k]; next = k; } if (t <= 0) { K = i + 1; break; } }
+    }
+    for (k = 0, i = 0; k < K; k++) { double w = wu_vol(&box[k], M[0]);
+        if (w > 0) { pal[i][0] = (int)(wu_vol(&box[k], M[1]) / w + 0.5); pal[i][1] = (int)(wu_vol(&box[k], M[2]) / w + 0.5); pal[i][2] = (int)(wu_vol(&box[k], M[3]) / w + 0.5); i++; } }
+    for (k = 0; k < 5; k++) free(M[k]);
+    return i;
+}
+#undef WI
 typedef struct { int lo, hi; } Box;
 static int g_axis;
 static int cmp_axis(const void *a, const void *b) { return ((const int *)a)[g_axis] - ((const int *)b)[g_axis]; }
@@ -736,9 +827,10 @@ int shrink(const unsigned char *drw, int dw, int dh, const unsigned char *orig, 
                 if (j == np) { pal[np][0] = r; pal[np][1] = g; pal[np][2] = b; np++; }
             }
         }
-        if (o->colours == C_KMEANS) np = kmeans(out, W, H, o->ncol, pal, o->dist);
+        if (o->colours == C_KMEANS) np = kmeans(out, W, H, o->ncol, pal, o->dist, o->kmpp);
+        if (o->colours == C_WU) np = wu(out, W, H, o->ncol, pal);
         if (o->colours == C_MEDIANCUT) np = mediancut(out, W, H, o->ncol, pal);
-        usepal = o->colours == C_ORIGINAL || o->colours == C_SHADES || o->colours == C_KMEANS || o->colours == C_MEDIANCUT;
+        usepal = o->colours == C_ORIGINAL || o->colours == C_SHADES || o->colours == C_KMEANS || o->colours == C_MEDIANCUT || o->colours == C_WU;
         if (np && usepal && o->regions && !o->dither) {
             /* by region: patches of like colour (Lab within 12 of the patch's first pixel, 4-connected) each take the
                palette colour most of their pixels are nearest to (Lab) */
@@ -810,6 +902,19 @@ int shrink(const unsigned char *drw, int dw, int dh, const unsigned char *orig, 
                 if (on[k] && nb4(m2, W, H, x, y) > 0 && !p[0] && !p[1] && !p[2]) { p[0] = p[1] = p[2] = p[3] = 0; any = 1; }
             }
             if (!any) break;
+        }
+        /* 8. stray edge pixels (B7; a rule from a Russian write-up of model sprites, Habr 2026): a covered pixel with 6 or
+           more of its 8 neighbours empty (or outside) is a speck on the edge, not part of the shape: it goes */
+        if (o->edgestray) {
+            unsigned char *cp = xm((size_t)W * H * 4); int gone = 0; memcpy(cp, out, (size_t)W * H * 4);
+            for (y = 0; y < H; y++) for (x = 0; x < W; x++) {
+                int u, v, empty = 0;
+                if (cp[((size_t)y * W + x) * 4 + 3] < 128) continue;
+                for (v = -1; v <= 1; v++) for (u = -1; u <= 1; u++) { int xx = x + u, yy = y + v;
+                    if (u || v) empty += xx < 0 || yy < 0 || xx >= W || yy >= H || cp[((size_t)yy * W + xx) * 4 + 3] < 128; }
+                if (empty >= 6) { memset(out + ((size_t)y * W + x) * 4, 0, 4); gone++; }
+            }
+            free(cp); (void)gone;
         }
         /* 8a. lone pixels: one that shares its colour with none of its 8 neighbours takes the commonest among them (3+) */
         if (o->orphans) {
