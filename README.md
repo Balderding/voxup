@@ -65,7 +65,7 @@ The sprites in these pictures are from OpenGameArt and are CC0 (public domain):
   No Python and no ComfyUI are needed; the models only ComfyUI can draw are folded away until `comfy =` is set.
 - **Panels you can resize**: drag the lines between the three panels (double-click: the standard width; kept in
   `work\pick.ini` `split=`); the grid shows as many pictures a row as fit, and every row fits its panel, down to a
-  900 x 600 window. A side panel folds to a thin strip (its **<** / **>** button, or **Ctrl+[** / **Ctrl+]**) and the
+  900 x 600 window. A side panel folds to a thin strip (its **<** / **>** button, **Ctrl+Left** / **Ctrl+Right**, or **Ctrl+[** / **Ctrl+]**) and the
   pictures take the room; a click on the strip opens it again.
 - **Sharp on any screen**: at 150 % or 200 % Windows scaling voxup draws itself at the real size (per-monitor DPI):
   text is crisp and every sprite pixel a whole number of screen pixels.
@@ -124,7 +124,7 @@ Everything is one click or one key away:
 | **PgUp** / **PgDn** | item before / after (only the items the Find box lets through) |
 | **Home** / **End** (or `,` `.`) | earlier / later round |
 | **Ctrl+Z** | undo: the last keep or setting change, then the one before (this session) |
-| **Ctrl+[** / **Ctrl+]** | fold or open the left / right panel |
+| **Ctrl+Left** / **Ctrl+Right** (or **Ctrl+[** / **Ctrl+]**) | fold or open the left / right panel |
 | **Ctrl+F** or **/** | the Find box |
 | **Q** / **R** | this item on or off the queue / run the queue |
 | **1** **2** **3** | the right panel: Chosen, Settings, Compare |
