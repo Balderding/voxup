@@ -513,7 +513,7 @@ static struct {
     int cmp_for; LONG cmp_gen; HBITMAP cmp_bm[17]; int cmp_w[17], cmp_h[17]; char cmp_score[17][64];
     volatile LONG sd_step, sd_steps; DWORD draw_t0; DWORD avg_ms[MAXM]; int nkeeps;
     int show_get, nget, unfocus; WINDOWPLACEMENT wp; int have_wp;   /* models to get shown; Esc in a text box; the window's place */
-    int want[2], split[2], drag, drag_w, cur_we, per; float drag_x;  /* the side panels' widths: wanted (pick.ini split=), shown; a divider dragged; the grid's columns */
+    int want[2], split[2], drag, drag_w, cur_we, per; float drag_x; int inl, ing, inr;   /* ...; the panels' inner widths */  /* the side panels' widths: wanted (pick.ini split=), shown; a divider dragged; the grid's columns */
 } S;
 /* drawn inside voxup: the built-in engine is in this voxup, the model has its lines, and the engine is chosen (or the
    model has no ComfyUI graph) */
@@ -1863,22 +1863,36 @@ static void preview(int r, int i) {
         S.pv_draw = mkbmp(sm, o, o, 1, 1); free(sm); stbi_image_free(d);
     }
 }
+/* a row of: fixed widths (> 0) and widths that share what is left (0), so it fits any panel (2026-11-22) */
+static void row_t(struct nk_context *ctx, float h, int n, const int *w) {
+    int i; nk_layout_row_template_begin(ctx, h);
+    for (i = 0; i < n; i++) { if (w[i] > 0) nk_layout_row_template_push_static(ctx, (float)w[i]); else nk_layout_row_template_push_dynamic(ctx); }
+    nk_layout_row_template_end(ctx);
+}
+/* a label as tall as its words need in a panel w wide (no words cut off at the edge); its place for clicks */
+static struct nk_rect wrap_lab(struct nk_context *ctx, const char *t, struct nk_color c, int w) {
+    const struct nk_user_font *f = ctx->style.font; float tw = f->width(f->userdata, f->height, t, (int)strlen(t)) * 1.15f;
+    int lines = w > 40 ? (int)(tw / (float)(w - 8)) + 1 : 2; struct nk_rect b;
+    if (lines > 8) lines = 8;
+    nk_layout_row_dynamic(ctx, 18.0f * (float)lines + 2, 1); b = nk_widget_bounds(ctx); nk_label_colored_wrap(ctx, t, c); return b;
+}
 /* ---------------------------------------------------------------- the shrink settings (shrink.h), in pipeline order */
 static void s_head(struct nk_context *ctx, const char *t) { nk_layout_row_dynamic(ctx, 22, 1); nk_label_colored(ctx, t, NK_TEXT_LEFT, GOLD); }
 static void s_combo(struct nk_context *ctx, const char *label, const char *const *items, int n, int *v) {
-    nk_layout_row_begin(ctx, NK_STATIC, 24, 2); nk_layout_row_push(ctx, 108); nk_label(ctx, label, NK_TEXT_LEFT);
-    nk_layout_row_push(ctx, 186); *v = nk_combo(ctx, items, n, *v < 0 || *v >= n ? 0 : *v, 22, nk_vec2(220, 22.0f * n + 16)); nk_layout_row_end(ctx);
+    static const int TW[] = { 108, 0 }; row_t(ctx, 24, 2, TW); nk_label(ctx, label, NK_TEXT_LEFT);
+    *v = nk_combo(ctx, items, n, *v < 0 || *v >= n ? 0 : *v, 22, nk_vec2(220, 22.0f * n + 16));
 }
 static void s_int(struct nk_context *ctx, const char *label, int *v, int lo, int hi, int step) {
     char nm[64]; snprintf(nm, sizeof nm, "#%s:", label);      /* the name shown once, inside the box */
-    nk_layout_row_begin(ctx, NK_STATIC, 24, 1); nk_layout_row_push(ctx, 298); nk_property_int(ctx, nm, lo, v, hi, step, (float)step); nk_layout_row_end(ctx);
+    nk_layout_row_dynamic(ctx, 24, 1); nk_property_int(ctx, nm, lo, v, hi, step, (float)step);
 }
 static void s_check(struct nk_context *ctx, const char *label, int *v) {     /* Off / On, plainly */
     static const char *const OO[] = { "Off", "On" }; int b = *v != 0;
-    nk_layout_row_begin(ctx, NK_STATIC, 24, 2); nk_layout_row_push(ctx, 228); nk_label(ctx, label, NK_TEXT_LEFT);
-    nk_layout_row_push(ctx, 66); b = nk_combo(ctx, OO, 2, b, 22, nk_vec2(80, 64)); nk_layout_row_end(ctx); *v = b;
+    static const int TW[] = { 0, 66 }; struct nk_rect lb; row_t(ctx, 24, 2, TW); lb = nk_widget_bounds(ctx); nk_label(ctx, label, NK_TEXT_LEFT);
+    if (nk_input_is_mouse_hovering_rect(&ctx->input, lb)) nk_tooltip(ctx, label);      /* cut short in a narrow panel: in full here */
+    b = nk_combo(ctx, OO, 2, b, 22, nk_vec2(80, 64)); *v = b;
 }
-static void s_note(struct nk_context *ctx, const char *t) { nk_layout_row_dynamic(ctx, 34, 1); nk_label_colored_wrap(ctx, t, DIM); }
+static void s_note(struct nk_context *ctx, const char *t) { wrap_lab(ctx, t, DIM, S.inr); }
 static void settings_panel(struct nk_context *ctx) {
     static const char *const SIZE[] = { "16 x 16", "32 x 32", "Any size (type it)" }, *const FIT[] = { "The original's box", "The whole sprite", "Stretched to fill" };
     static const char *const SMOOTH[] = { "None", "Median 3 x 3", "Bilateral (keeps edges)" };
@@ -1892,12 +1906,10 @@ static void settings_panel(struct nk_context *ctx) {
         int own = S.own_opt; nk_flags ef;
         s_check(ctx, "These settings for this item only", &own);
         if (own != S.own_opt) item_opt_toggle();
-        nk_layout_row_begin(ctx, NK_STATIC, 24, 2);
-        nk_layout_row_push(ctx, 178); ef = nk_edit_string_zero_terminated(ctx, NK_EDIT_FIELD | NK_EDIT_SIG_ENTER, S.newpreset, sizeof S.newpreset, nk_filter_default);
+        { static const int TW[] = { 0, 116 }; row_t(ctx, 24, 2, TW); }
+        ef = nk_edit_string_zero_terminated(ctx, NK_EDIT_FIELD | NK_EDIT_SIG_ENTER, S.newpreset, sizeof S.newpreset, nk_filter_default);
         if (ef & NK_EDIT_ACTIVE) S.find_typing = 1;
-        nk_layout_row_push(ctx, 116);
         if (button(ctx, "Save as preset", 0, S.newpreset[0] != 0) || ((ef & NK_EDIT_COMMITED) && S.newpreset[0])) { save_preset(S.newpreset); S.newpreset[0] = 0; nk_edit_unfocus(ctx); }
-        nk_layout_row_end(ctx);
     }
     s_head(ctx, "Size");
     s_combo(ctx, "Sprite size", SIZE, 3, &o->size);
@@ -1977,14 +1989,14 @@ static void compare_panel(struct nk_context *ctx, Shot *s) {
     nk_layout_row_static(ctx, 96, 96, 2);
     if (S.bm_orig) nk_image(ctx, nkimg(S.bm_orig, 96, 96)); else nk_spacing(ctx, 1);
     if (S.bm_up) nk_image(ctx, nkimg(S.bm_up, 96, 96)); else nk_label_colored(ctx, "(none)", NK_TEXT_LEFT, DIM);
-    if (!s || s->st != ST_DONE) { nk_layout_row_dynamic(ctx, 40, 1); nk_label_colored_wrap(ctx, "Click a picture (or an arrow key): its drawing is shown here through every preset.", DIM); return; }
+    if (!s || s->st != ST_DONE) { wrap_lab(ctx, "Click a picture (or an arrow key): its drawing is shown here through every preset.", DIM, S.inr); return; }
     compare_make(s);
-    nk_layout_row_dynamic(ctx, 20, 1);
-    { char t[96]; snprintf(t, sizeof t, "%s seed %u, by preset (click one to use it):", S.m[s->model].name, s->seed); nk_label_colored(ctx, t, NK_TEXT_LEFT, GOLD); }
-    for (i = 0; i < S.np; i += 2) {
+    { char t[96]; snprintf(t, sizeof t, "%s seed %u, by preset (click one to use it):", S.m[s->model].name, s->seed); wrap_lab(ctx, t, GOLD, S.inr); }
+    {   int cper = (S.inr + 4) / 156; if (cper < 1) cper = 1;     /* as many as fit beside each other */
+    for (i = 0; i < S.np; i += cper) {
         int j; struct nk_command_buffer *cv; const struct nk_user_font *f = ctx->style.font;
-        nk_layout_row_static(ctx, 96 + 34, 156, 2);
-        for (j = i; j < i + 2; j++) {
+        nk_layout_row_static(ctx, 96 + 34, 152, cper);
+        for (j = i; j < i + cper; j++) {
             struct nk_rect b; enum nk_widget_layout_states ws;
             if (j >= S.np) { nk_spacing(ctx, 1); continue; }
             ws = nk_widget(&b, ctx); if (ws == NK_WIDGET_INVALID) continue;
@@ -1999,8 +2011,8 @@ static void compare_panel(struct nk_context *ctx, Shot *s) {
             if (ws == NK_WIDGET_VALID && nk_input_is_mouse_click_down_in_rect(&ctx->input, NK_BUTTON_LEFT, b, nk_true)) { preset_apply_to(&S.opt, j); status("Preset: %s", S.pname[j]); }
         }
     }
-    nk_layout_row_dynamic(ctx, 50, 1);
-    nk_label_colored_wrap(ctx, "fit: how much the sprite and the original's (or the upright picture's) shape cover each other. col (only when the colours are not the original's): how far they are from the original's. lone: the share of single pixels of a colour.", DIM);
+    }
+    wrap_lab(ctx, "fit: how much the sprite and the original's (or the upright picture's) shape cover each other. col (only when the colours are not the original's): how far they are from the original's. lone: the share of single pixels of a colour.", DIM, S.inr);
 }
 /* the lines between the panels (2026-11-22): drag one to make the panels beside it wider or narrower, double-click it
    for its standard place; the widths are kept in pick.ini (split=) and the grid takes what is left */
@@ -2045,6 +2057,8 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
         {   /* the grid's columns: as many 128-pixel pictures as fit beside each other */
             int inner = gw - (int)(2 * ctx->style.window.group_padding.x + ctx->style.window.scrollbar_size.x) - 8;
             S.per = (inner + 4) / 132; if (S.per < 1) S.per = 1; if (S.per > 10) S.per = 10;
+            S.ing = inner; inner = (int)(2 * ctx->style.window.group_padding.x + ctx->style.window.scrollbar_size.x);
+            S.inl = S.split[0] - inner; S.inr = S.split[1] - inner;
         }
     }
     nk_layout_row_begin(ctx, NK_STATIC, (float)(H - 16), 5);
@@ -2053,22 +2067,19 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
     if (nk_group_begin(ctx, "item", NK_WINDOW_BORDER)) {
         {   /* Find: the list, < > and PgUp/PgDn keep to the items that fit; Enter goes to the first */
             struct nk_rect bb; nk_flags ef; char old[48]; snprintf(old, sizeof old, "%s", S.find);
-            nk_layout_row_begin(ctx, NK_STATIC, 24, 3);
-            nk_layout_row_push(ctx, 40); nk_label_colored(ctx, "Item", NK_TEXT_LEFT, GOLD);
-            nk_layout_row_push(ctx, 170); bb = nk_widget_bounds(ctx);
+            static const int TW[] = { 40, 0, 64 }; row_t(ctx, 24, 3, TW);
+            nk_label_colored(ctx, "Item", NK_TEXT_LEFT, GOLD);
+            bb = nk_widget_bounds(ctx);
             if (S.find_focus) { nk_edit_focus(ctx, NK_EDIT_FIELD | NK_EDIT_SIG_ENTER); S.find_focus = 0; }
             ef = nk_edit_string_zero_terminated(ctx, NK_EDIT_FIELD | NK_EDIT_SIG_ENTER, S.find, sizeof S.find, nk_filter_default);
             S.find_typing = (ef & NK_EDIT_ACTIVE) != 0;
             if (nk_input_is_mouse_hovering_rect(&ctx->input, bb)) nk_tooltip(ctx, "Find (Ctrl+F or /): a number, part of the name, kept, new, tilted or queued; Enter goes to the first.");
             if ((ef & NK_EDIT_COMMITED) && !busy) { first_fit(); nk_edit_unfocus(ctx); }
-            nk_layout_row_push(ctx, 90);
             if (S.find[0]) { snprintf(lab, sizeof lab, "%d fit", count_fits()); nk_label_colored(ctx, lab, NK_TEXT_LEFT, DIM); }
             else nk_label_colored(ctx, "(find)", NK_TEXT_LEFT, DIM);
-            nk_layout_row_end(ctx);
         }
-        nk_layout_row_begin(ctx, NK_STATIC, 28, 3);
-        nk_layout_row_push(ctx, 30); if (button(ctx, "<", 0, !busy)) step_item(-1);
-        nk_layout_row_push(ctx, 220);
+        { static const int TW[] = { 30, 0, 30 }; row_t(ctx, 28, 3, TW); }
+        if (button(ctx, "<", 0, !busy)) step_item(-1);
         snprintf(lab, sizeof lab, "%03d %s%s%s", S.item, S.name[S.item], S.kept[S.item] ? "  (kept)" : "", queued(S.item) ? "  (queued)" : "");
         if (!busy && nk_combo_begin_label(ctx, lab, nk_vec2(300, 520))) {
             nk_layout_row_dynamic(ctx, 22, 1);
@@ -2080,26 +2091,26 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
             }
             nk_combo_end(ctx);
         } else if (busy) { nk_widget_disable_begin(ctx); nk_button_label(ctx, lab); nk_widget_disable_end(ctx); }
-        nk_layout_row_push(ctx, 30); if (button(ctx, ">", 0, !busy)) step_item(1);
-        nk_layout_row_end(ctx);
+        if (button(ctx, ">", 0, !busy)) step_item(1);
         {   /* the queue: this item on or off (Q), every item found, Run */
-            nk_layout_row_begin(ctx, NK_STATIC, 24, 3);
-            nk_layout_row_push(ctx, 96); if (button(ctx, queued(S.item) ? "Off queue" : "Queue it (Q)", 0, 1)) queue_toggle(S.item);
-            nk_layout_row_push(ctx, 96); if (button(ctx, "Queue found", 0, S.find[0] != 0)) queue_add_fits();
-            nk_layout_row_push(ctx, 104);
+            nk_layout_row_dynamic(ctx, 24, 3);
+            if (button(ctx, queued(S.item) ? "Off queue" : "Queue it (Q)", 0, 1)) queue_toggle(S.item);
+            if (button(ctx, "Queue found", 0, S.find[0] != 0)) queue_add_fits();
             if (S.qrun) { snprintf(lab, sizeof lab, "Stop queue (%d)", S.nq); if (button(ctx, lab, 0, 1)) S.qrun = 0; }
             else { snprintf(lab, sizeof lab, "Run queue (%d)", S.nq); if (button(ctx, lab, S.nq > 0, S.nq > 0 && !busy)) { S.qrun = 1; status("Running the queue: a round for each of %d item(s).", S.nq); } }
-            nk_layout_row_end(ctx);
         }
         /* the three before pictures: the original, our tool's enlarged one, the upright one (voxup.ini upright =) */
         /* the three before pictures (the original, our tool's enlarged one, the upright one): a click on one = the
            models draw from it (framed) */
         nk_layout_row_dynamic(ctx, 18, 1); nk_label_colored(ctx, "Draw from: click a picture (framed)", NK_TEXT_LEFT, GOLD);
-        nk_layout_row_static(ctx, 18, 100, 3); nk_label_colored(ctx, "Original 16", NK_TEXT_LEFT, DIM); nk_label_colored(ctx, "Enlarged 32", NK_TEXT_LEFT, DIM); nk_label_colored(ctx, "Upright 32", NK_TEXT_LEFT, DIM);
-        nk_layout_row_static(ctx, 100, 100, 3);
-        {   static const int FR[3] = { FROM_ORIG, FROM_TOOL, FROM_UP }; HBITMAP bm[3]; int c, pick = -1;
+        {   static const int FR[3] = { FROM_ORIG, FROM_TOOL, FROM_UP }; static const char *const FL[3] = { "Original 16", "Enlarged 32", "Upright 32" };
+            HBITMAP bm[3]; int c, c0, pick = -1, bper = (S.inl + 4) / 104;
+            if (bper < 1) bper = 1; if (bper > 3) bper = 3;
             bm[0] = S.bm_orig; bm[1] = S.bm_tool; bm[2] = S.bm_up;
-            for (c = 0; c < 3; c++) {
+            for (c0 = 0; c0 < 3; c0 += bper) {     /* as many to a row as fit the panel */
+            nk_layout_row_static(ctx, 18, 100, bper); for (c = c0; c < c0 + bper; c++) { if (c < 3) nk_label_colored(ctx, FL[c], NK_TEXT_LEFT, DIM); else nk_spacing(ctx, 1); }
+            nk_layout_row_static(ctx, 100, 100, bper);
+            for (c = c0; c < c0 + bper && c < 3; c++) {
                 struct nk_rect b; enum nk_widget_layout_states ws = nk_widget(&b, ctx); struct nk_command_buffer *cv;
                 if (ws == NK_WIDGET_INVALID) continue;
                 cv = nk_window_get_canvas(ctx);
@@ -2109,6 +2120,7 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
                 if (ws == NK_WIDGET_VALID && bm[c] && nk_input_is_mouse_click_down_in_rect(&ctx->input, NK_BUTTON_LEFT, b, nk_true)) pick = FR[c];
                 if (nk_input_is_mouse_hovering_rect(&ctx->input, b)) nk_tooltip(ctx, S.from == FR[c] ? "The models draw from this one." : "Click: the models draw from this one.");
             }
+            }
             if (pick >= 0 && pick != S.from) { if (busy) status("Drawing: choose what it draws from when the round is done."); else set_from(pick); }
         }
         if (S.up_hand) { nk_layout_row_dynamic(ctx, 20, 1); nk_label_colored(ctx, "Upright: hand-made (your upright folder)", NK_TEXT_LEFT, DIM); }
@@ -2117,18 +2129,16 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
                               *sll[] = { "Grip as it is", "Slim sword grip", "Slim shaft" };
             int m = S.up_mode, st = S.up_style, sl = S.up_slim, remake = 0; struct nk_rect bb;
             if (busy) nk_widget_disable_begin(ctx);
-            nk_layout_row_begin(ctx, NK_STATIC, 24, 3);
-            nk_layout_row_push(ctx, 60); bb = nk_widget_bounds(ctx); nk_label(ctx, "Upright", NK_TEXT_LEFT);
+            static const int TW[] = { 60, 0, 0 }; row_t(ctx, 24, 3, TW);
+            bb = nk_widget_bounds(ctx); nk_label(ctx, "Upright", NK_TEXT_LEFT);
             if (nk_input_is_mouse_hovering_rect(&ctx->input, bb)) nk_tooltip(ctx, "Stands a tilted item upright at 32 x 32 from the original (cleanEdge turn, no new colours). Auto: only when it lies tilted.");
-            nk_layout_row_push(ctx, 130); m = nk_combo(ctx, ml, 4, m, 22, nk_vec2(150, 120));
-            nk_layout_row_push(ctx, 110); st = nk_combo(ctx, stl, 2, st, 22, nk_vec2(110, 70));
-            nk_layout_row_end(ctx);
-            nk_layout_row_begin(ctx, NK_STATIC, 24, 3);
-            nk_layout_row_push(ctx, 60); nk_label(ctx, "", NK_TEXT_LEFT);
-            nk_layout_row_push(ctx, 130); sl = nk_combo(ctx, sll, 3, sl, 22, nk_vec2(150, 100));
-            nk_layout_row_push(ctx, 110); bb = nk_widget_bounds(ctx); remake = nk_button_label(ctx, "Remake");
+            m = nk_combo(ctx, ml, 4, m, 22, nk_vec2(150, 120));
+            st = nk_combo(ctx, stl, 2, st, 22, nk_vec2(110, 70));
+            row_t(ctx, 24, 3, TW);
+            nk_label(ctx, "", NK_TEXT_LEFT);
+            sl = nk_combo(ctx, sll, 3, sl, 22, nk_vec2(150, 100));
+            bb = nk_widget_bounds(ctx); remake = nk_button_label(ctx, "Remake");
             if (nk_input_is_mouse_hovering_rect(&ctx->input, bb)) nk_tooltip(ctx, "Makes the upright picture again from the original (a touch-up made by hand in its upright.png goes).");
-            nk_layout_row_end(ctx);
             if (busy) nk_widget_disable_end(ctx);
             if (!busy && (m != S.up_mode || st != S.up_style || sl != S.up_slim || remake)) {
                 S.up_mode = m; S.up_style = st; S.up_slim = sl; up_settings(S.item, 1);
@@ -2144,7 +2154,7 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
         }
         nk_layout_row_dynamic(ctx, 20, 1);
         if (S.keptinfo[0]) nk_label_colored(ctx, S.keptinfo, NK_TEXT_LEFT, TEAL2); else nk_label_colored(ctx, "Not kept yet", NK_TEXT_LEFT, DIM);
-        if (S.desc_made) nk_label_colored(ctx, S.desc_word ? "What it is: made from the other, still says it lies tilted" : "What it is: made from the other, check it", NK_TEXT_LEFT, GOLD);
+        if (S.desc_made) wrap_lab(ctx, S.desc_word ? "What it is: made from the other, still says it lies tilted" : "What it is: made from the other, check it", GOLD, S.inl);
         else nk_label_colored(ctx, "What it is (goes into the prompt)", NK_TEXT_LEFT, GOLD);
         nk_layout_row_dynamic(ctx, 110, 1);
         nk_edit_string_zero_terminated(ctx, NK_EDIT_BOX, S.descbuf, sizeof S.descbuf, nk_filter_default);
@@ -2153,13 +2163,11 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
 #if SD_BUILT
         {   /* which engine draws the models that both can draw */
             static const char *el[] = { "Built-in", "ComfyUI" }; struct nk_rect bb;
-            nk_layout_row_begin(ctx, NK_STATIC, 24, 2); nk_layout_row_push(ctx, 120); bb = nk_widget_bounds(ctx); nk_label(ctx, "Engine", NK_TEXT_LEFT);
+            static const int TW[] = { 90, 0 }; row_t(ctx, 24, 2, TW); bb = nk_widget_bounds(ctx); nk_label(ctx, "Engine", NK_TEXT_LEFT);
             if (nk_input_is_mouse_hovering_rect(&ctx->input, bb)) nk_tooltip(ctx, "Built-in: drawn inside voxup, no ComfyUI. ComfyUI: started hidden. A model only one can draw uses that one.");
-            nk_layout_row_push(ctx, 180);
             if (busy) nk_widget_disable_begin(ctx);
             S.engine = nk_combo(ctx, el, 2, S.engine, 22, nk_vec2(180, 80));
             if (busy) nk_widget_disable_end(ctx);
-            nk_layout_row_end(ctx);
         }
 #endif
         {   int nget = 0; for (i = 0; i < S.nm; i++) nget += !S.m[i].ready;
@@ -2167,18 +2175,15 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
         for (i = 0; i < S.nm; i++) {
             Model *M = &S.m[i]; struct nk_rect bb; int dl = S.dl_busy && S.dl_model == i;
             if (!M->ready && !dl && !S.show_get) continue;      /* the ones still to get: folded (the row below) */
-            nk_layout_row_begin(ctx, NK_STATIC, 24, 3);
-            nk_layout_row_push(ctx, 128); bb = nk_widget_bounds(ctx);
+            { static const int TW[] = { 0, 80, 80 }; row_t(ctx, 24, 3, TW); }
+            bb = nk_widget_bounds(ctx);
             nk_label_colored(ctx, M->name, NK_TEXT_LEFT, !M->ready ? DIM : M->n ? TEAL2 : nk_rgb(215, 215, 220));
-            if (M->note[0] && nk_input_is_mouse_hovering_rect(&ctx->input, bb)) nk_tooltip(ctx, M->note);
-            nk_layout_row_push(ctx, 80);
+            if (nk_input_is_mouse_hovering_rect(&ctx->input, bb)) nk_tooltip(ctx, M->note[0] ? M->note : M->name);
             if (M->ready) { if (busy) nk_widget_disable_begin(ctx); nk_property_int(ctx, "#n", 0, &M->n, 20, 1, 1); if (busy) nk_widget_disable_end(ctx); }
             else nk_spacing(ctx, 1);
-            nk_layout_row_push(ctx, 80);
             if (dl) { snprintf(lab, sizeof lab, "Stop %d%%", S.dl_total ? (int)(S.dl_done * 100 / S.dl_total) : 0); if (button(ctx, lab, 0, !S.dl_stop)) InterlockedExchange(&S.dl_stop, 1); }
             else if (!M->ready) { snprintf(lab, sizeof lab, "Get %.1f GB", gb(model_missing(i))); if (button(ctx, lab, 0, !S.dl_busy)) start_get(i); }
             else if (button(ctx, "Only", 0, !busy)) { int j; for (j = 0; j < S.nm; j++) S.m[j].n = 0; M->n = 20; }
-            nk_layout_row_end(ctx);
         }
         if (S.nget) {
             nk_layout_row_dynamic(ctx, 24, 1);
@@ -2186,7 +2191,7 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
             if (button(ctx, lab, 0, 1)) S.show_get = !S.show_get;
         }
         EnterCriticalSection(&S.cs);
-        if (S.dl_busy || S.dl_msg[0]) { nk_layout_row_dynamic(ctx, 36, 1); nk_label_colored_wrap(ctx, S.dl_msg, S.dl_busy ? GOLD : TEAL2); }
+        if (S.dl_busy || S.dl_msg[0]) wrap_lab(ctx, S.dl_msg, S.dl_busy ? GOLD : TEAL2, S.inl);
         LeaveCriticalSection(&S.cs);
         if (S.dl_busy) { nk_size d = (nk_size)(S.dl_done >> 20), t = (nk_size)(S.dl_total >> 20); nk_layout_row_dynamic(ctx, 14, 1); nk_progress(ctx, &d, t ? t : 1, 0); }
         if (nk_tree_push(ctx, NK_TREE_TAB, "Prompts ({d} = what it is)", NK_MINIMIZED)) {
@@ -2215,56 +2220,55 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
     if (nk_group_begin(ctx, "grid", NK_WINDOW_BORDER)) {
         Round *R = S.nr ? &S.r[S.cur] : NULL; int r, c, kdone = 0, dbl = -1, rclick = -1;
         /* Draw and Stop over the pictures, the status line under them: always in sight */
-        nk_layout_row_begin(ctx, NK_STATIC, 32, 2);
-        nk_layout_row_push(ctx, 330);
+        { static const float RT[] = { 0.66f, 0.34f }; if (S.ing >= 360) nk_layout_row(ctx, NK_DYNAMIC, 32, 2, RT); else nk_layout_row_dynamic(ctx, 32, 1); }
         snprintf(lab, sizeof lab, S.nr ? "New %d seeds  (Space)" : "Draw %d  (Space)", round_size());
         if (button(ctx, lab, 1, !busy && round_size() > 0 && round_size() <= MAXSHOT)) start_round();
-        nk_layout_row_push(ctx, 150);
         if (button(ctx, S.stop && busy ? "Stopping..." : "Stop  (Esc)", 0, busy && !S.stop)) {
             InterlockedExchange(&S.stop, 1); status("Stopping after this picture..."); S.qrun = 0;
 #if SD_BUILT
             if (SDX_DRAWING && SDX) sd_cancel_generation(SDX, SD_CANCEL_ALL);     /* the built-in engine stops at once */
 #endif
         }
-        nk_layout_row_end(ctx);
-        nk_layout_row_dynamic(ctx, 36, 1);
-        EnterCriticalSection(&S.cs); snprintf(lab, sizeof lab, "%.400s%s", S.status, S.sdstep); LeaveCriticalSection(&S.cs); nk_label_colored_wrap(ctx, lab, GOLD);
+        EnterCriticalSection(&S.cs); snprintf(lab, sizeof lab, "%.400s%s", S.status, S.sdstep); LeaveCriticalSection(&S.cs); wrap_lab(ctx, lab, GOLD, S.ing);
         if (vlog_problems() != S.prob_seen) { S.prob_seen = vlog_problems(); snprintf(S.problem, sizeof S.problem, "%s", vlog_last()); }
         if (S.problem[0]) {     /* every WARN/ERR reaches the user: the last one, its path and reason, until clicked */
             char pl[460]; struct nk_rect pb;
             snprintf(pl, sizeof pl, "Problem: %.400s  (click to clear; all in voxup.log)", S.problem);
-            nk_layout_row_dynamic(ctx, 18, 1); pb = nk_widget_bounds(ctx); nk_label_colored(ctx, pl, NK_TEXT_LEFT, GOLD);
+            pb = wrap_lab(ctx, pl, GOLD, S.ing);
             if (nk_input_is_mouse_click_down_in_rect(&ctx->input, NK_BUTTON_LEFT, pb, nk_true)) S.problem[0] = 0;
             if (nk_input_is_mouse_hovering_rect(&ctx->input, pb)) nk_tooltip(ctx, S.problem);
         }
-        nk_layout_row_begin(ctx, NK_STATIC, 28, 6);
-        nk_layout_row_push(ctx, 80); if (button(ctx, "< Back", 0, S.cur > 0)) { S.cur--; S.sel = -1; kick_reshape(); }
-        nk_layout_row_push(ctx, 80); if (button(ctx, "Next >", 0, S.cur < S.nr - 1)) { S.cur++; S.sel = -1; kick_reshape(); }
-        nk_layout_row_push(ctx, 20); nk_spacing(ctx, 1);
+        {   /* Back, Next, the round; the colours beside them when the grid is wide, else under them */
+            static const int TW1[] = { 80, 80, 0, 150, 150 }, TW2[] = { 80, 80, 0 }; int wide = S.ing >= 720;
+            if (S.ing >= 360) row_t(ctx, 28, wide ? 5 : 3, wide ? TW1 : TW2); else nk_layout_row_dynamic(ctx, 28, 2);
+        }
+        if (button(ctx, "< Back", 0, S.cur > 0)) { S.cur--; S.sel = -1; kick_reshape(); }
+        if (button(ctx, "Next >", 0, S.cur < S.nr - 1)) { S.cur++; S.sel = -1; kick_reshape(); }
         if (R) { int stale = 0; for (i = 0; i < R->n; i++) { kdone += R->s[i].st == ST_DONE; stale += R->s[i].st == ST_DONE && R->s[i].gen != S.optgen; }
                  if (stale) snprintf(lab, sizeof lab, "Round %d of %d: remaking %d...", S.cur + 1, S.nr, stale);
                  else snprintf(lab, sizeof lab, "Round %d of %d: %d drawn", S.cur + 1, S.nr, kdone); }
         else snprintf(lab, sizeof lab, "No pictures yet: press Draw");
-        nk_layout_row_push(ctx, 230); nk_label_colored(ctx, lab, NK_TEXT_LEFT, GOLD);
+        {   struct nk_rect lb; if (S.ing < 360) nk_layout_row_dynamic(ctx, 20, 1);
+            lb = nk_widget_bounds(ctx); nk_label_colored(ctx, lab, NK_TEXT_LEFT, GOLD);
+            if (nk_input_is_mouse_hovering_rect(&ctx->input, lb)) nk_tooltip(ctx, lab); }
         /* 2026-11-21: the sprites in the original's colours (clamped) or the model's own; Keep takes the one shown */
-        nk_layout_row_push(ctx, 150); if (button(ctx, "Original's colours", S.opt.colours == C_ORIGINAL, 1)) S.opt.colours = C_ORIGINAL;
-        nk_layout_row_push(ctx, 150); if (button(ctx, "Model's colours", S.opt.colours == C_OWN, 1)) S.opt.colours = C_OWN;
-        nk_layout_row_end(ctx);
+        if (S.ing < 720) nk_layout_row_dynamic(ctx, 28, S.ing >= 300 ? 2 : 1);
+        if (button(ctx, "Original's colours", S.opt.colours == C_ORIGINAL, 1)) S.opt.colours = C_ORIGINAL;
+        if (button(ctx, "Model's colours", S.opt.colours == C_OWN, 1)) S.opt.colours = C_OWN;
         {   /* the presets: one click each (F1, F2, ...), the one in use lit */
-            int now = preset_now(), p, per = 7;
+            int now = preset_now(), p, per = (S.ing - 50) / 96;     /* as many to a row as fit */
+            if (per < 1) per = 1; if (per > 12) per = 12;
             for (p = 0; p < S.np; p++) {
                 struct nk_rect bb; char t[48];
-                if (p % per == 0) { if (p) nk_layout_row_end(ctx); nk_layout_row_begin(ctx, NK_STATIC, 24, per + 1); nk_layout_row_push(ctx, 50); nk_label_colored(ctx, p ? "" : "Preset", NK_TEXT_LEFT, DIM); }
-                nk_layout_row_push(ctx, 92); bb = nk_widget_bounds(ctx);
+                if (p % per == 0) { int tw[13] = { 50 }; row_t(ctx, 24, per + 1, tw); nk_label_colored(ctx, p ? "" : "Preset", NK_TEXT_LEFT, DIM); }
+                bb = nk_widget_bounds(ctx);
                 snprintf(t, sizeof t, "%s", S.pname[p]);
                 if (button(ctx, t, p == now, 1)) { preset_apply_to(&S.opt, p); status("Preset: %s", S.pname[p]); }
                 if (nk_input_is_mouse_hovering_rect(&ctx->input, bb)) { char h[480]; snprintf(h, sizeof h, "F%d. %s", p + 1, S.pset[p][0] ? S.pset[p] : "the standard settings"); nk_tooltip(ctx, h); }
             }
-            if (S.np) nk_layout_row_end(ctx);
         }
-        nk_layout_row_dynamic(ctx, 18, 1);
-        nk_label_colored(ctx, "Click: look at it   Double-click / Enter: keep   Right-click / Del: draw that one again   Space / Ctrl+Enter: draw   Esc: stop", NK_TEXT_LEFT, DIM);
-        nk_label_colored(ctx, "Arrows: choose   PgUp/PgDn: item   Home/End: round   Ctrl+Z: undo keep   Ctrl+F: find   Q / R: queue / run it   1 2 3: panels   F1..: presets", NK_TEXT_LEFT, DIM);
+        wrap_lab(ctx, "Click: look at it   Double-click / Enter: keep   Right-click / Del: draw that one again   Space / Ctrl+Enter: draw   Esc: stop", DIM, S.ing);
+        wrap_lab(ctx, "Arrows: choose   PgUp/PgDn: item   Home/End: round   Ctrl+Z: undo keep   Ctrl+F: find   Q / R: queue / run it   1 2 3: panels   F1..: presets", DIM, S.ing);
         for (r = 0; R && r * S.per < R->n; r++) {
             nk_layout_row_static(ctx, 128 + 20, 128, S.per);
             for (c = 0; c < S.per; c++) {
@@ -2330,6 +2334,8 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
         else {
         nk_layout_row_dynamic(ctx, 20, 1);
         if (s && s->st == ST_DONE) {
+            nk_layout_row_dynamic(ctx, 40, 1);      /* first, so it is in sight at any window size */
+            if (button(ctx, "Keep this one (Enter)", 1, 1)) keep_next();
             preview(S.cur, S.sel);
             snprintf(lab, sizeof lab, "%s seed %u", S.m[s->model].name, s->seed); nk_label_colored(ctx, lab, NK_TEXT_LEFT, GOLD);
             snprintf(lab, sizeof lab, "As it will be in the game (%d x %d)", s->rw, s->rh); nk_label_colored(ctx, lab, NK_TEXT_LEFT, DIM);
@@ -2341,8 +2347,6 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
             }
             nk_layout_row_dynamic(ctx, 20, 1); nk_label_colored(ctx, "The model's drawing", NK_TEXT_LEFT, DIM);
             nk_layout_row_static(ctx, 192, 192, 1); if (S.pv_draw) nk_image(ctx, nkimg(S.pv_draw, 192, 192));
-            nk_layout_row_dynamic(ctx, 40, 1);
-            if (button(ctx, "Keep this one (Enter)", 1, 1)) keep_next();
             if (S.undo_item >= 0) { nk_layout_row_dynamic(ctx, 28, 1); if (button(ctx, "Undo the last keep (Ctrl+Z)", 0, !busy)) undo_keep(); }   /* this session only */
             s_check(ctx, "After Keep: the next new item", &S.auto_next);
         } else {
