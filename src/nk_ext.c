@@ -11,9 +11,21 @@ void nk_ext_row(struct nk_context *ctx, float h, int n, const int *w) {
     nk_layout_row_template_end(ctx);
 }
 
+/* how many lines Nuklear's wrap makes of t in a line w wide: words (cut at spaces) as long as they fit */
+static int wrap_lines(const struct nk_user_font *f, const char *t, float w) {
+    int lines = 1, ns = 0; float x = 0, sp = f->width(f->userdata, f->height, " ", 1); const char *p = t;
+    while (*p) {      /* each word with the spaces before it (all of them: "   " counts three) */
+        const char *e = p; float ww;
+        while (*e && *e != ' ') e++;
+        ww = f->width(f->userdata, f->height, p, (int)(e - p));
+        if (x > 0 && x + ns * sp + ww > w) { lines++; x = ww; } else x += (x > 0 ? ns * sp : 0) + ww;
+        while (x > w && ww > w) { lines++; x -= w; ww -= w; }       /* a word longer than the line */
+        p = e; ns = 0; while (*p == ' ') { p++; ns++; }
+    }
+    return lines;
+}
 struct nk_rect nk_ext_wrap_label(struct nk_context *ctx, const char *t, struct nk_color c, int w) {
-    const struct nk_user_font *f = ctx->style.font; float tw = f->width(f->userdata, f->height, t, (int)strlen(t)) * 1.15f;
-    int lines = w > 40 ? (int)(tw / (float)(w - 8)) + 1 : 2; struct nk_rect b;
+    const struct nk_user_font *f = ctx->style.font; int lines = w > 40 ? wrap_lines(f, t, (float)w - 2 * ctx->style.text.padding.x) : 2; struct nk_rect b;
     if (lines > 8) lines = 8;
     nk_layout_row_dynamic(ctx, 18.0f * (float)lines + 2, 1); b = nk_widget_bounds(ctx); nk_label_colored_wrap(ctx, t, c);
     return b;

@@ -526,6 +526,7 @@ static struct {
     int want[2], split[2], drag, drag_w, cur_we, per; float drag_x; int inl, ing, inr;
     int empty; char empty_msg[400];             /* no sprites yet: the window asks for the folder (one exe) */
     int lic_ask, need_token; char tok[256];     /* Get waits for the licence click (model + 1); a Hugging Face token asked for (never saved in a file or log) */
+    unsigned folds; int keys_open;              /* Settings sections folded (bit per section); the key list shown */
     unsigned prob_gone[32]; int nprob_gone; float prob_gap; struct nk_rect prob_rect;   /* Problem texts clicked away (not shown again); the room it kept */
 } S;
 /* drawn inside voxup: the built-in engine is in this voxup, the model has its lines, and the engine is chosen (or the
@@ -2010,6 +2011,17 @@ static void preview(int r, int i) {
 }
 /* ---------------------------------------------------------------- the shrink settings (shrink.h), in pipeline order */
 static void s_head(struct nk_context *ctx, const char *t) { nk_layout_row_dynamic(ctx, 22, 1); nk_label_colored(ctx, t, NK_TEXT_LEFT, GOLD); }
+/* a Settings section: its title folds it open or shut (kept in pick.ini folds=); the basic ones start open (B3) */
+#define FOLDS_DEFAULT (~((1u << 0) | (1u << 4) | (1u << 7)))     /* Size, Colours, Outline open */
+static int s_section(struct nk_context *ctx, const char *t, int i) {
+    char l[80]; int open = !(S.folds & (1u << i)); struct nk_rect b;
+    snprintf(l, sizeof l, "%s %s", open ? "-" : "+", t);
+    nk_layout_row_dynamic(ctx, 22, 1); b = nk_widget_bounds(ctx);
+    nk_label_colored(ctx, l, NK_TEXT_LEFT, GOLD);
+    if (nk_input_is_mouse_click_down_in_rect(&ctx->input, NK_BUTTON_LEFT, b, nk_true)) S.folds ^= 1u << i;
+    if (nk_input_is_mouse_hovering_rect(&ctx->input, b)) nk_ext_tooltip(ctx, open ? "Click: fold this away" : "Click: show these settings");
+    return open;
+}
 static void s_combo(struct nk_context *ctx, const char *label, const char *const *items, int n, int *v) {
     static const int TW[] = { 108, 0 }; nk_ext_row(ctx, 24, 2, TW); nk_label(ctx, label, NK_TEXT_LEFT);
     *v = nk_combo(ctx, items, n, *v < 0 || *v >= n ? 0 : *v, 22, nk_vec2(220, 22.0f * n + 16));
@@ -2043,25 +2055,28 @@ static void settings_panel(struct nk_context *ctx) {
         if (ef & NK_EDIT_ACTIVE) S.find_typing = 1;
         if (button(ctx, "Save as preset", 0, S.newpreset[0] != 0) || ((ef & NK_EDIT_COMMITED) && S.newpreset[0])) { save_preset(S.newpreset); S.newpreset[0] = 0; nk_edit_unfocus(ctx); }
     }
-    s_head(ctx, "Size");
+    if (s_section(ctx, "Size", 0)) {
     s_combo(ctx, "Sprite size", SIZE, 3, &o->size);
     if (o->size == SZ_CUSTOM) { s_int(ctx, "Width", &o->cw, 1, 128, 1); s_int(ctx, "Height", &o->ch, 1, 128, 1);
         if (o->cw > 32 || o->ch > 32) s_note(ctx, "Over 32 x 32 the game cannot take it: Keep saves it in out\\pick\\export."); }
     s_combo(ctx, "Fit", FIT, 3, &o->fit);
     s_int(ctx, "Margin", &o->margin, 0, 8, 1);
-    s_head(ctx, "Cutting out the background");
+    }
+    if (s_section(ctx, "Cutting out the background", 1)) {
     s_int(ctx, "Colour distance", &o->bg_dist, 10, 250, 5);
     s_check(ctx, "Plain magenta is background", &o->magenta);
     s_int(ctx, "Cover kept (of 255)", &o->alpha_cut, 1, 254, 4);
     s_check(ctx, "Flood from the border", &o->flood);
     if (o->flood) s_note(ctx, "Pink fringe and the model's shadow go too; holes inside stay.");
-    s_head(ctx, "Before shrinking");
+    }
+    if (s_section(ctx, "Before shrinking", 2)) {
     s_int(ctx, "Contrast", &o->contrast, -100, 100, 5);
     s_int(ctx, "Brightness", &o->brightness, -100, 100, 5);
     s_int(ctx, "Saturation", &o->saturation, -100, 100, 5);
     s_combo(ctx, "Smoothing", SMOOTH, 3, &o->smooth);
     s_int(ctx, "Sharpen %", &o->sharpen, 0, 300, 10);
-    s_head(ctx, "Shrinking");
+    }
+    if (s_section(ctx, "Shrinking", 3)) {
     s_combo(ctx, "Method", METHOD_NAMES, M_COUNT, &o->method);
     if (o->method == M_DPID) { s_int(ctx, "Detail (x100)", &o->dpid_lambda, 0, 300, 10); s_note(ctx, "DPID, Weber et al. 2016: pixels that stand out count more."); }
     if (o->method == M_SAID) { s_int(ctx, "Sharpen (x100)", &o->said_gamma, 0, 400, 10); s_int(ctx, "Edge texture", &o->said_alpha, 0, 200, 5); s_int(ctx, "Texture", &o->said_beta, 0, 200, 5);
@@ -2073,7 +2088,8 @@ static void settings_panel(struct nk_context *ctx) {
     s_check(ctx, "Shape decided on its own", &o->silhouette);
     if (o->silhouette) s_note(ctx, "Half-covered pixels kept, and thin lines (covered more than both neighbours).");
     s_int(ctx, "Fill pinholes", &o->pinholes, 0, 3, 1);
-    s_head(ctx, "Colours");
+    }
+    if (s_section(ctx, "Colours", 4)) {
     s_combo(ctx, "Colours", COL, 6, &o->colours);
     if (o->colours == C_KMEANS || o->colours == C_MEDIANCUT) s_int(ctx, "How many", &o->ncol, 2, 32, 1);
     if (o->colours != C_OWN && o->colours != C_ASDRAWN) {
@@ -2084,23 +2100,27 @@ static void settings_panel(struct nk_context *ctx) {
     }
     if (o->colours == C_OWN) s_int(ctx, "Pink snapped at", &o->pink, 0, 100, 5);
     s_int(ctx, "Black below", &o->black, 0, 128, 4);
-    s_head(ctx, "The model's black line");
+    }
+    if (s_section(ctx, "The model's black line", 5)) {
     s_combo(ctx, "Its line", LINE, 2, &line);
     if (line == 1) o->peel = 0; else { if (!o->peel) o->peel = 4; s_int(ctx, "Layers taken off", &o->peel, 1, 4, 1); }
-    s_head(ctx, "Clean-up");
+    }
+    if (s_section(ctx, "Clean-up", 6)) {
     s_check(ctx, "Lone pixels take their neighbours' colour", &o->orphans);
     s_check(ctx, "Doubled corners in lines off", &o->jaggies);
-    s_head(ctx, "Outline");
+    }
+    if (s_section(ctx, "Outline", 7)) {
     s_combo(ctx, "Outline", OUTL, 5, &o->outline);
     s_check(ctx, "Black bites into it filled", &o->notch);
     s_check(ctx, "2 x 2 black blocks broken", &o->blocks);
     if (o->outline != O_NONE) s_int(ctx, "Thickness", &o->othick, 1, 4, 1);
     else s_combo(ctx, "Edge", EDGE, 2, &o->edge);
+    }
     nk_layout_row_dynamic(ctx, 8, 1); nk_spacing(ctx, 1);
     nk_layout_row_dynamic(ctx, 28, 1);
     if (button(ctx, "Back to the standard settings", 0, 1)) shrink_defaults(o);
     shrink_describe(o, d, sizeof d);
-    nk_layout_row_dynamic(ctx, 60, 1); nk_label_colored_wrap(ctx, d, DIM);
+    nk_ext_wrap_label(ctx, d, DIM, S.inr);
 }
 /* what the models are given (a click on a before picture): the description so far saved for the one before, the new
    one's loaded */
@@ -2381,10 +2401,11 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
     if (nk_group_begin(ctx, "grid", NK_WINDOW_BORDER)) {
         Round *R = S.nr ? &S.r[S.cur] : NULL; int r, c, kdone = 0, dbl = -1, rclick = -1;
         /* Draw and Stop over the pictures, the status line under them: always in sight */
-        { static const float RT[] = { 0.66f, 0.34f }; if (S.ing >= 360) nk_layout_row(ctx, NK_DYNAMIC, 32, 2, RT); else nk_layout_row_dynamic(ctx, 32, 1); }
-        snprintf(lab, sizeof lab, S.nr ? "New %d seeds  (Space)" : "Draw %d  (Space)", round_size());
+        { static const float RT[] = { 0.66f, 0.34f }; nk_layout_row(ctx, NK_DYNAMIC, 32, 2, RT); }
+        if (S.ing >= 360) snprintf(lab, sizeof lab, S.nr ? "New %d seeds  (Space)" : "Draw %d  (Space)", round_size());
+        else snprintf(lab, sizeof lab, S.nr ? "New %d" : "Draw %d", round_size());
         if (button(ctx, lab, 1, !busy && round_size() > 0 && round_size() <= MAXSHOT)) start_round();
-        if (button(ctx, S.stop && busy ? "Stopping..." : "Stop  (Esc)", 0, busy && !S.stop)) {
+        if (button(ctx, S.stop && busy ? "Stopping..." : S.ing >= 360 ? "Stop  (Esc)" : "Stop", 0, busy && !S.stop)) {
             InterlockedExchange(&S.stop, 1); status("Stopping after this picture..."); S.qrun = 0;
 #if SD_BUILT
             if (SDX_DRAWING && SDX) sd_cancel_generation(SDX, SD_CANCEL_ALL);     /* the built-in engine stops at once */
@@ -2429,6 +2450,16 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
         if (S.ing < 720) nk_layout_row_dynamic(ctx, 28, S.ing >= 300 ? 2 : 1);
         if (button(ctx, "Original's colours", S.opt.colours == C_ORIGINAL, 1)) S.opt.colours = C_ORIGINAL;
         if (button(ctx, "Model's colours", S.opt.colours == C_OWN, 1)) S.opt.colours = C_OWN;
+        if (S.ing < 360 && S.np) {      /* a narrow grid: the presets as one list, so the pictures stay in sight (P2-4) */
+            static const int TW[] = { 50, 0 }; int now = preset_now(), p; char cur[48];
+            snprintf(cur, sizeof cur, "%s", now >= 0 ? S.pname[now] : "(own settings)");
+            nk_ext_row(ctx, 24, 2, TW); nk_label_colored(ctx, "Preset", NK_TEXT_LEFT, DIM);
+            if (nk_combo_begin_label(ctx, cur, nk_vec2(220, 26.0f * S.np + 10))) {
+                nk_layout_row_dynamic(ctx, 22, 1);
+                for (p = 0; p < S.np; p++) if (nk_combo_item_label(ctx, S.pname[p], NK_TEXT_LEFT)) { preset_apply_to(&S.opt, p); status("Preset: %s", S.pname[p]); }
+                nk_combo_end(ctx);
+            }
+        } else
         {   /* the presets: one click each (F1, F2, ...), the one in use lit */
             int now = preset_now(), p, per = (S.ing - 50) / 96;     /* as many to a row as fit */
             if (per < 1) per = 1; if (per > 12) per = 12;
@@ -2441,8 +2472,14 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
                 if (nk_input_is_mouse_hovering_rect(&ctx->input, bb)) { char h[480]; snprintf(h, sizeof h, "F%d. %s", p + 1, S.pset[p][0] ? S.pset[p] : "the standard settings"); nk_ext_tooltip(ctx, h); }
             }
         }
-        nk_ext_wrap_label(ctx, "Click: look at it   Double-click / Enter: keep   Right-click / Del: draw that one again   Space / Ctrl+Enter: draw   Esc: stop", DIM, S.ing);
-        nk_ext_wrap_label(ctx, "Arrows: choose   PgUp/PgDn: item   Home/End: round   Ctrl+Z: undo keep   Ctrl+F: find   Q / R: queue / run it   1 2 3: panels   F1..: presets", DIM, S.ing);
+        {   struct nk_rect kb; nk_layout_row_dynamic(ctx, 18, 1); kb = nk_widget_bounds(ctx);
+            nk_label_colored(ctx, S.keys_open ? "- Keys (click to fold)" : S.ing >= 420 ? "+ Keys: Space draws, Enter keeps, Esc stops (click for all)" : "+ Keys (click)", NK_TEXT_LEFT, DIM);
+            if (nk_input_is_mouse_click_down_in_rect(&ctx->input, NK_BUTTON_LEFT, kb, nk_true)) S.keys_open = !S.keys_open;
+            if (S.keys_open) {
+                nk_ext_wrap_label(ctx, "Click: look at it   Double-click / Enter: keep   Right-click / Del: draw that one again   Space / Ctrl+Enter: draw   Esc: stop", DIM, S.ing);
+                nk_ext_wrap_label(ctx, "Arrows: choose   PgUp/PgDn: item   Home/End: round   Ctrl+Z: undo keep   Ctrl+F: find   Q / R: queue / run it   1 2 3: panels   F1..: presets", DIM, S.ing);
+            }
+        }
         for (r = 0; R && r * S.per < R->n; r++) {
             nk_layout_row_static(ctx, 128 + 36, 128, S.per);
             for (c = 0; c < S.per; c++) {
@@ -2593,7 +2630,7 @@ static void settings(int save) {
         for (m = 0; m < S.nm; m++) { snprintf(l, sizeof l, "n.%s=%d\r\n", S.m[m].id, S.m[m].n); buf_str(&b, l); }
         for (m = 0; m < S.nm; m++) if (S.m[m].sdimage == 2) { snprintf(l, sizeof l, "strength.%s=%d\r\n", S.m[m].id, S.m[m].strength); buf_str(&b, l); }
         for (m = 0; m < S.nm; m++) if (S.m[m].has_lora) { snprintf(l, sizeof l, "lora.%s=%d\r\n", S.m[m].id, S.m[m].lora_w); buf_str(&b, l); }
-        snprintf(l, sizeof l, "engine=%d\r\nsplit=%d,%d\r\n", S.engine, S.want[0], S.want[1]); buf_str(&b, l);
+        snprintf(l, sizeof l, "engine=%d\r\nsplit=%d,%d\r\nfolds=%u\r\nkeys=%d\r\n", S.engine, S.want[0], S.want[1], S.folds, S.keys_open); buf_str(&b, l);
         write_all(p, b.p, b.n); free(b.p); return;
     }
     for (m = 0; m < S.nm; m++) S.m[m].n = !strcmp(S.m[m].id, "klein") || !strcmp(S.m[m].id, "kontext") ? 10 : 0;
@@ -2611,6 +2648,8 @@ static void settings(int save) {
     }
     if (!any) for (m = 0; m < S.nm; m++) if (S.m[m].ready) { S.m[m].n = 10; if (++any == 2) break; }
     if ((q = strstr(t, "\nengine="))) S.engine = atoi(q + 8) == 1;
+    if ((q = strstr(t, "\nfolds="))) S.folds = (unsigned)strtoul(q + 7, NULL, 10);
+    if ((q = strstr(t, "\nkeys="))) S.keys_open = atoi(q + 6) == 1;
     if ((q = strstr(t, "\nsplit="))) { int a, b2; if (sscanf(q + 7, "%d,%d", &a, &b2) == 2) {     /* fitted to the least widths (review 2, P3-8) */
         S.want[0] = a < LEFT_MIN ? LEFT_MIN : a > 3999 ? 3999 : a; S.want[1] = b2 < RIGHT_MIN ? RIGHT_MIN : b2 > 3999 ? 3999 : b2; } }
     if ((q = strstr(t, "\nauto_next="))) S.auto_next = atoi(q + 11) == 1;
@@ -2754,7 +2793,7 @@ static int gui(int argc, char **argv) {
         }
     }
     InitializeCriticalSection(&S.cs);
-    S.want[0] = LEFT_DEF; S.want[1] = RIGHT_DEF; S.per = 5;
+    S.want[0] = LEFT_DEF; S.want[1] = RIGHT_DEF; S.per = 5; S.folds = FOLDS_DEFAULT;
     S.r = xmalloc(sizeof(Round) * MAXR); S.sel = -1; S.pv_for = -1; S.upitem = -1; S.undo_item = -1;
     S.job = CreateJobObjectA(NULL, NULL);
     if (S.job) { memset(&jl, 0, sizeof jl); jl.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE; SetInformationJobObject(S.job, JobObjectExtendedLimitInformation, &jl, sizeof jl); }
