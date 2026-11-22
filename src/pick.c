@@ -552,7 +552,9 @@ static int file_there(const MFile *f) {
 }
 /* what a model still needs, in bytes (a file two models share counts once: it is one file) */
 static long long model_missing(int m) { long long t = 0; int i; for (i = 0; i < S.m[m].nf; i++) if (!file_there(&S.m[m].f[i])) t += S.m[m].f[i].size; return t; }
-static void check_ready(void) { int i; for (i = 0; i < S.nm; i++) S.m[i].ready = model_missing(i) == 0 && S.m[i].nf > 0; }
+/* a model this voxup can draw: by the built-in engine (its sd lines), or by ComfyUI when voxup.ini comfy = is set */
+static int usable(int m) { return (SD_BUILT && S.m[m].nsd > 0) || (P_COMFY[0] && S.m[m].graph); }
+static void check_ready(void) { int i; for (i = 0; i < S.nm; i++) S.m[i].ready = model_missing(i) == 0 && S.m[i].nf > 0 && usable(i); }
 /* a file of the model list: the models folder's own (voxup.ini models =, else models\ beside the exe), else the copy
    built into voxup.exe (embed.c); p gets where it came from. NULL when neither has it. */
 static char *model_file(const char *name, char *p, size_t np, int *built_in) {
@@ -2273,7 +2275,7 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
             if (busy) nk_widget_disable_end(ctx);
         }
 #endif
-        {   int nget = 0; for (i = 0; i < S.nm; i++) nget += !S.m[i].ready;
+        {   int nget = 0; for (i = 0; i < S.nm; i++) nget += !S.m[i].ready && usable(i);
             S.nget = nget; }
         if (S.lic_ask > 0 && S.lic_ask <= S.nm) {    /* Get pressed: the model's licences, one click to accept */
             Model *M = &S.m[S.lic_ask - 1]; int j;
@@ -2289,7 +2291,9 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
             if (button(ctx, "Accept and get", 1, 1)) { int mm = S.lic_ask - 1; lic_accept(mm); start_get(mm); }
             if (button(ctx, "Not now", 0, 1)) S.lic_ask = 0;
         }
-        {   int ready = 0, rec = -1; for (i = 0; i < S.nm; i++) { ready += S.m[i].ready; if (S.m[i].recommended && rec < 0) rec = i; }
+        {   int nc = 0; for (i = 0; i < S.nm; i++) nc += !usable(i);
+            if (nc) { snprintf(lab, sizeof lab, "%d more model%s need ComfyUI (set comfy = in voxup.ini to use them)", nc, nc > 1 ? "s" : ""); wrap_lab(ctx, lab, DIM, S.inl); } }
+        {   int ready = 0, rec = -1; for (i = 0; i < S.nm; i++) { ready += S.m[i].ready; if (S.m[i].recommended && usable(i) && rec < 0) rec = i; }
             if (!ready && rec >= 0 && !S.dl_busy && !S.lic_ask) {     /* nothing to draw with yet: one click */
                 wrap_lab(ctx, "Get a model first: one click.", GOLD, S.inl);
                 snprintf(lab, sizeof lab, "Get %s (%.1f GB)", S.m[rec].name, gb(model_missing(rec)));
@@ -2298,6 +2302,7 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
         }
         for (i = 0; i < S.nm; i++) {
             Model *M = &S.m[i]; struct nk_rect bb; int dl = S.dl_busy && S.dl_model == i;
+            if (!usable(i)) continue;                           /* only ComfyUI draws it, and there is no comfy =: folded away */
             if (!M->ready && !dl && !S.show_get) continue;      /* the ones still to get: folded (the row below) */
             { static const int TW[] = { 0, 80, 80 }; row_t(ctx, 24, 3, TW); }
             bb = nk_widget_bounds(ctx);
