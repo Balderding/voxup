@@ -1,6 +1,5 @@
-# voxup.ini: where things are. Copy this file to voxup.ini beside voxup.exe and fill in your folders.
-# Lines are "key = value"; # starts a comment. Only sprites is needed to open the window; comfy and model_files
-# to draw and to get models.
+# voxup.ini: where things are. voxup writes a short one itself on its first start (and asks for sprites); this file
+# lists every key. Lines are "key = value"; # starts a comment. Nothing here is needed to open the window.
 
 # the original sprites, NNN.png (000.png, 001.png, ...), up to 32 x 32
 sprites = C:\path\to\sprites
@@ -18,13 +17,16 @@ enlarged = C:\path\to\enlarged
 comfy = C:\path\to\ComfyUI
 comfy_paths = C:\path\to\extra_model_paths.yaml
 # the models folder (diffusion_models, text_encoders, vae, checkpoints, loras ...): Get puts files here, ComfyUI
-# and the built-in engine read them from here
+# and the built-in engine read them from here. Without it: model-files beside voxup.exe
 model_files = C:\path\to\ComfyUI\models
+# the models whose licences were accepted (Get adds to it)
+# licence_ok = qwen2511g
 port = 8189
 # where Keep writes NNN.png (may repeat, up to 4); the biggest picture the game takes
 game = C:\path\to\game\sprites
 game_max = 32
-# optional: where rounds, keeps and logs go (default out\pick beside the exe); the model list (default models\)
+# optional: where rounds, keeps and logs go (default out\pick beside the exe); a model list of your own (default: the
+# one built into voxup.exe; a models folder beside the exe wins, file by file)
 # work = C:\path\to\voxup-work
 # models = C:\path\to\models
 # optional: how many item numbers there are (up to 512), and numbers left out of the list

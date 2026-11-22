@@ -58,6 +58,13 @@ The sprites in these pictures are from OpenGameArt and are CC0 (public domain):
 [16x16 RPG Icon Pack](https://opengameart.org/content/16x16-rpg-icon-pack) by stealthix. Thank you to both.
 
 ## What's new
+- **One exe, nothing else needed.** `voxup.exe` runs from an empty folder: the model list is built in, the first start
+  writes its own `voxup.ini` and asks for the sprites folder (one button), and **Get a model first** downloads the
+  recommended model with one click. Every download shows the model's licence first (one click to accept), is checked
+  against its SHA-256, and goes on from where it stopped. Vulkan (part of the graphics driver) is only loaded to draw.
+  No Python and no ComfyUI are needed; the models only ComfyUI can draw are folded away until `comfy =` is set.
+- **Panels you can resize**: drag the lines between the three panels (double-click: the standard width); the grid
+  shows as many pictures a row as fit, and every row fits its panel, down to a 900 x 600 window.
 - **Fewer clicks.** Every feature is one click or one key away: Space draws, double-click or Enter keeps, right-click
   or Delete draws that one picture again, PgUp/PgDn change the item, Ctrl+Z undoes the last keep, 1 2 3 change the
   right panel, F1... take a preset (the full list is below).
@@ -79,10 +86,15 @@ The sprites in these pictures are from OpenGameArt and are CC0 (public domain):
   the whole round after a picture was drawn again.
 
 ## Setting it up
-1. Build it (below), or put `voxup.exe` in a folder with the `models` folder of this repo beside it.
-2. Copy `voxup.ini.example` to `voxup.ini` beside `voxup.exe` and fill in your folders: the original sprites
-   (`NNN.png`), ComfyUI's folder, ComfyUI's models folder, and the folder(s) Keep writes into.
-3. Start `voxup.exe`.
+1. Build it (below) and put `voxup.exe` in any folder. Nothing else is needed beside it.
+2. Start `voxup.exe`. The first time it writes `voxup.ini` beside itself and asks for the folder with your sprites
+   (`000.png`, `001.png` ... at 16 x 16); the choice is kept in `voxup.ini`.
+3. With no model on the computer yet, **Get a model first** gets the recommended one (its licence is shown first).
+   Model files go to `model-files` beside `voxup.exe` (`model_files =` in voxup.ini to put them elsewhere, e.g.
+   ComfyUI's models folder).
+4. Optional, in `voxup.ini` (every key is in `voxup.ini.example`): `game =` folders Keep writes into (else
+   `work\export`), `names =` and `desc =` files, `comfy =` for the models only ComfyUI draws. A `models` folder beside
+   `voxup.exe` (or `models =`) overrides the built-in model list, file by file.
 
 ## Using it
 Everything is one click or one key away:
@@ -133,9 +145,12 @@ one row (**N more models to get...**). The window comes back where and as big as
 - **Engine**: **Built-in** draws the models that have `sd` lines inside voxup (no ComfyUI; the model stays loaded between
   rounds); **ComfyUI** draws them in ComfyUI. A model only one of them can draw always uses that one.
 - **Models**: how many pictures each model draws in a round (0 to 20, at most 40 a round). **Only** = that model alone.
-  A model not on your computer yet shows **Get N GB**: its files are downloaded in the background straight into
-  ComfyUI's models folder (each file as `.part` until it is complete and the right size; a stopped download goes on
-  from where it stopped; files two models share are got once; free disk space is checked first).
+  A model not on your computer yet shows **Get N GB**: first its licences are shown (**Read** opens one; **Accept and
+  get**, asked once per model and kept in voxup.ini `licence_ok =`), then its files are downloaded in the background
+  into `model_files =` (each file as `.part` until it is complete, the right size and its SHA-256 matches; a damaged one
+  is removed and got again; a stopped download goes on from where it stopped; files two models share are got once;
+  free disk space is checked first). A model behind a Hugging Face login asks for a token once: it is typed as stars
+  and kept in Windows' Credential Manager, never in a file or the log.
 - **Draw / New seeds**: ComfyUI is started hidden the first time (about 30 s). Each picture appears as soon as it is
   ready; the one drawing shows its progress (the built-in engine's steps, else the time against that model's usual).
   **Stop** stops after the picture being drawn.
