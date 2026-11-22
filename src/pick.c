@@ -520,9 +520,12 @@ static struct {
     int cmp_for; LONG cmp_gen; HBITMAP cmp_bm[17]; int cmp_w[17], cmp_h[17]; char cmp_score[17][64];
     volatile LONG sd_step, sd_steps; DWORD draw_t0; DWORD avg_ms[MAXM]; int nkeeps;
     int show_get, nget, unfocus; WINDOWPLACEMENT wp; int have_wp;   /* models to get shown; Esc in a text box; the window's place */
+    /* the side panels' widths: wanted (pick.ini split=), shown; a divider dragged; the grid's columns; the panels'
+       inner widths */
     int want[2], split[2], drag, drag_w, cur_we, per; float drag_x; int inl, ing, inr;
-    int empty; char empty_msg[400];
-    int lic_ask, need_token; char tok[256];     /* Get waits for the licence click (model + 1); a Hugging Face token asked for (never saved in a file or log) */             /* no sprites yet: the window asks for the folder (2026-11-22, one exe) */   /* ...; the panels' inner widths */  /* the side panels' widths: wanted (pick.ini split=), shown; a divider dragged; the grid's columns */
+    int empty; char empty_msg[400];             /* no sprites yet: the window asks for the folder (one exe) */
+    int lic_ask, need_token; char tok[256];     /* Get waits for the licence click (model + 1); a Hugging Face token asked for (never saved in a file or log) */
+    unsigned prob_gone[32]; int nprob_gone; float prob_gap; struct nk_rect prob_rect;   /* Problem texts clicked away (not shown again); the room it kept */
 } S;
 /* drawn inside voxup: the built-in engine is in this voxup, the model has its lines, and the engine is chosen (or the
    model has no ComfyUI graph) */
@@ -1016,13 +1019,13 @@ static void choose(int pos) {
                                   for (rf = rj; *rf; rf++) if (*rf == '\r') *rf = '\n'; }
     itemdir(item, p, sizeof p); strcat(p, "\\rounds.txt");
     if ((t = read_all(p, NULL))) {
-        char *l;
+        char *l, unk[24] = ""; int nunk = 0;     /* pictures of models no longer in models.txt: said once for the item */
         for (l = strtok(t, "\r\n"); l; l = strtok(NULL, "\r\n")) {
             int rd, mi; char m[24], src[16] = "", key[48]; unsigned seed; Shot s; char sp[MAX_PATH];
             if (sscanf(l, "%d %23s %u %15s", &rd, m, &seed, src) < 3 || rd < 0 || rd >= MAXR) continue;
             snprintf(key, sizeof key, "\n%s %u\n", m, seed);
             if (rj && strstr(rj, key)) continue;        /* thrown out */
-            if ((mi = find_model(m)) < 0) { vlog(VLOG_WARN, "pick", "%03d: a picture of model \"%s\", which is not in models.txt: not shown", item, m); continue; }
+            if ((mi = find_model(m)) < 0) { if (!nunk++) snprintf(unk, sizeof unk, "%s", m); continue; }
             memset(&s, 0, sizeof s); s.model = mi; s.seed = seed; s.src = !strcmp(src, "upright") ? FROM_UP : FROM_TOOL;
             shotpath(item, &s, 1, sp, sizeof sp);
             if (!(d = load_rgba(sp, &w, &h))) continue;
@@ -1033,6 +1036,7 @@ static void choose(int pos) {
             }
             stbi_image_free(d);
         }
+        if (nunk) vlog(VLOG_WARN, "pick", "%03d: %d picture%s of model%s not in models.txt (\"%s\"%s): not shown", item, nunk, nunk > 1 ? "s" : "", nunk > 1 ? "s" : "", unk, nunk > 1 ? " ..." : "");
         free(t);
     }
     free(rj); }
@@ -1431,7 +1435,7 @@ again:
            busy is 0): look once more under S.cs before busy is cleared, so none is left waiting (review A3) */
         int more = 0;
         EnterCriticalSection(&S.cs);
-        if (!S.stop) for (i = 0; i < R->n; i++) if (R->s[i].st == ST_WAIT) more = 1;
+        for (i = 0; i < R->n; i++) if (R->s[i].st == ST_WAIT) { if (S.stop) R->s[i].st = ST_STOP; else more = 1; }   /* (review 2, P3-1) */
         if (!more) InterlockedExchange(&S.busy, 0);
         LeaveCriticalSection(&S.cs);
         if (more) goto again;
@@ -1503,14 +1507,22 @@ static void start_round(void) {
     th = CreateThread(NULL, 0, worker, NULL, 0, NULL);
     if (th) CloseHandle(th); else { InterlockedExchange(&S.busy, 0); status("Could not start the drawing thread: %s", vlog_errno()); }
 }
+/* a shrink setting changed: a new generation, the shown round made again (the main loop each frame; keep() too, so a
+   key that changes a setting and Enter in the same batch keep the new one, review 2 P3-5) */
+static void opt_check(void) {
+    static ShrinkOpt last; static int have;
+    if (!have || memcmp(&last, &S.opt, sizeof last)) { if (have) { InterlockedIncrement(&S.optgen); kick_reshape(); if (S.own_opt) item_opt_save(S.item); } last = S.opt; have = 1; }
+}
 static void keep(void) {
     Shot *s; char dst[MAX_PATH], bk[MAX_PATH], line[6000], d[4096], stamp[32], how[600]; int i, ok = 1, rw, rh; unsigned char *px; time_t t = time(NULL); struct tm *tm = localtime(&t);
     if (S.sel < 0 || S.cur >= S.nr || S.sel >= S.r[S.cur].n) return;
     s = &S.r[S.cur].s[S.sel];
     if (s->st != ST_DONE) return;
+    opt_check();
     if (s->gen != S.optgen) {      /* not yet remade with the settings as they are: remade now, so Keep writes what the
                                       settings say (review A10); the reshaper is stopped first, then goes on */
         stop_reshape(); reshape_one(S.item, s, &S.opt, S.optgen); kick_reshape();
+        if (!s->drw) { char sp[MAX_PATH]; shotpath(S.item, s, 0, sp, sizeof sp); status("The drawing %s is gone: not kept (its sprite would be the old one).", sp); return; }
     }
     strftime(stamp, sizeof stamp, "%Y-%m-%d_%H%M%S", tm);
     if (!s->res) return;
@@ -2247,6 +2259,7 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
             if (busy) nk_widget_disable_end(ctx);
             if (!busy && (m != S.up_mode || st != S.up_style || sl != S.up_slim || remake)) {
                 S.up_mode = m; S.up_style = st; S.up_slim = sl; up_settings(S.item, 1);
+                stop_reshape();         /* it may be shrinking into the box load_upright rewrites (review 2, P2-1) */
                 load_upright(S.item, 1);
                 if (S.bm_up) DeleteObject(S.bm_up); if (S.pv_up) DeleteObject(S.pv_up); S.bm_up = S.pv_up = NULL;
                 if (S.has_up) { S.bm_up = mkbmp(S.up, 32, 32, 3, 0); S.pv_up = mkbmp(S.up, 32, 32, 6, 0); }
@@ -2370,13 +2383,26 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
 #endif
         }
         EnterCriticalSection(&S.cs); snprintf(lab, sizeof lab, "%.400s%s", S.status, S.sdstep); LeaveCriticalSection(&S.cs); wrap_lab(ctx, lab, GOLD, S.ing);
-        if (vlog_problems() != S.prob_seen) { S.prob_seen = vlog_problems(); snprintf(S.problem, sizeof S.problem, "%s", vlog_last()); }
+        if (vlog_problems() != S.prob_seen) {
+            unsigned hsh = 5381; const char *c; int g, gone = 0; S.prob_seen = vlog_problems();
+            for (c = vlog_last(); *c; c++) hsh = hsh * 33 + (unsigned char)*c;
+            for (g = 0; g < S.nprob_gone; g++) gone |= S.prob_gone[g] == hsh;
+            if (!gone) snprintf(S.problem, sizeof S.problem, "%s", vlog_last());       /* one clicked away is not shown again */
+        }
         if (S.problem[0]) {     /* every WARN/ERR reaches the user: the last one, its path and reason, until clicked */
             char pl[460]; struct nk_rect pb;
             snprintf(pl, sizeof pl, "Problem: %.400s  (click to clear; all in voxup.log)", S.problem);
             pb = wrap_lab(ctx, pl, GOLD, S.ing);
-            if (nk_input_is_mouse_click_down_in_rect(&ctx->input, NK_BUTTON_LEFT, pb, nk_true)) S.problem[0] = 0;
-            if (nk_input_is_mouse_hovering_rect(&ctx->input, pb)) nk_tooltip(ctx, S.problem);
+            if (nk_input_is_mouse_click_down_in_rect(&ctx->input, NK_BUTTON_LEFT, pb, nk_true)) {
+                unsigned hsh = 5381; const char *c;
+                for (c = S.problem; *c; c++) hsh = hsh * 33 + (unsigned char)*c;
+                if (S.nprob_gone < 32) S.prob_gone[S.nprob_gone++] = hsh;
+                S.problem[0] = 0; S.prob_gap = pb.h; S.prob_rect = pb;        /* its room stays while the mouse is on it */
+            }
+            if (S.problem[0] && nk_input_is_mouse_hovering_rect(&ctx->input, pb)) nk_tooltip(ctx, S.problem);
+        } else if (S.prob_gap > 0) {    /* cleared: nothing moves up under the mouse until it leaves that place */
+            if (nk_input_is_mouse_hovering_rect(&ctx->input, S.prob_rect)) { nk_layout_row_dynamic(ctx, S.prob_gap, 1); nk_spacing(ctx, 1); }
+            else S.prob_gap = 0;
         }
         {   /* Back, Next, the round; the colours beside them when the grid is wide, else under them */
             static const int TW1[] = { 80, 80, 0, 150, 150 }, TW2[] = { 80, 80, 0 }; int wide = S.ing >= 720;
@@ -2410,7 +2436,7 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
         wrap_lab(ctx, "Click: look at it   Double-click / Enter: keep   Right-click / Del: draw that one again   Space / Ctrl+Enter: draw   Esc: stop", DIM, S.ing);
         wrap_lab(ctx, "Arrows: choose   PgUp/PgDn: item   Home/End: round   Ctrl+Z: undo keep   Ctrl+F: find   Q / R: queue / run it   1 2 3: panels   F1..: presets", DIM, S.ing);
         for (r = 0; R && r * S.per < R->n; r++) {
-            nk_layout_row_static(ctx, 128 + 20, 128, S.per);
+            nk_layout_row_static(ctx, 128 + 36, 128, S.per);
             for (c = 0; c < S.per; c++) {
                 struct nk_rect b; enum nk_widget_layout_states ws; struct nk_command_buffer *cv; Shot *s; int k = r * S.per + c;
                 const struct nk_user_font *f = ctx->style.font; char t[64];
@@ -2446,9 +2472,15 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
                         nk_fill_rect(cv, nk_rect(b.x + 8, b.y + 100, (float)(112 * fr), 8), 0, TEAL2);
                     }
                 }
-                snprintf(t, sizeof t, "%s %u", S.m[s->model].name, s->seed);
-                { static const struct nk_color mc[] = { { 120, 210, 200, 255 }, { 150, 190, 230, 255 }, { 230, 200, 110, 255 }, { 150, 215, 140, 255 }, { 190, 170, 235, 255 }, { 220, 220, 225, 255 } };
-                  nk_draw_text(cv, nk_rect(b.x, b.y + 130, 128, 18), t, (int)strlen(t), f, nk_rgb(45, 45, 45), mc[s->model % 6]); }
+                {   /* the model's name (cut with "..." when it is longer than the cell) and, under it, the seed whole (review 2, P2-3) */
+                    static const struct nk_color mc[] = { { 120, 210, 200, 255 }, { 150, 190, 230, 255 }, { 230, 200, 110, 255 }, { 150, 215, 140, 255 }, { 190, 170, 235, 255 }, { 220, 220, 225, 255 } };
+                    char nm[64]; int len; snprintf(nm, sizeof nm, "%s", S.m[s->model].name); len = (int)strlen(nm);
+                    while (len > 1 && f->width(f->userdata, f->height, nm, len) > 126) { len--; nm[len] = 0; if (len > 3) { nm[len - 1] = nm[len - 2] = nm[len - 3] = '.'; } }
+                    nk_draw_text(cv, nk_rect(b.x, b.y + 130, 128, 17), nm, len, f, nk_rgb(45, 45, 45), mc[s->model % 6]);
+                    snprintf(t, sizeof t, "seed %u", s->seed);
+                    nk_draw_text(cv, nk_rect(b.x, b.y + 147, 128, 17), t, (int)strlen(t), f, nk_rgb(45, 45, 45), DIM);
+                    if (nk_input_is_mouse_hovering_rect(&ctx->input, nk_rect(b.x, b.y + 128, 128, 36))) { char tt[96]; snprintf(tt, sizeof tt, "%s, seed %u", S.m[s->model].name, s->seed); nk_tooltip(ctx, tt); }
+                }
                 if (S.sel == k) nk_stroke_rect(cv, nk_rect(b.x - 3, b.y - 3, 134, 134), 0, 3, TEAL2);
                 if (ws == NK_WIDGET_VALID && s->st == ST_DONE && nk_input_mouse_clicked(&ctx->input, NK_BUTTON_LEFT, b)) { S.sel = k; if (S.tab == 1) S.tab = 0; }
                 if (ws == NK_WIDGET_VALID && s->st == ST_DONE && nk_input_is_mouse_click_down_in_rect(&ctx->input, NK_BUTTON_DOUBLE, b, nk_true)) dbl = k;
@@ -2572,7 +2604,8 @@ static void settings(int save) {
     }
     if (!any) for (m = 0; m < S.nm; m++) if (S.m[m].ready) { S.m[m].n = 10; if (++any == 2) break; }
     if ((q = strstr(t, "\nengine="))) S.engine = atoi(q + 8) == 1;
-    if ((q = strstr(t, "\nsplit="))) { int a, b2; if (sscanf(q + 7, "%d,%d", &a, &b2) == 2 && a >= LEFT_MIN && a < 4000 && b2 >= RIGHT_MIN && b2 < 4000) { S.want[0] = a; S.want[1] = b2; } }
+    if ((q = strstr(t, "\nsplit="))) { int a, b2; if (sscanf(q + 7, "%d,%d", &a, &b2) == 2) {     /* fitted to the least widths (review 2, P3-8) */
+        S.want[0] = a < LEFT_MIN ? LEFT_MIN : a > 3999 ? 3999 : a; S.want[1] = b2 < RIGHT_MIN ? RIGHT_MIN : b2 > 3999 ? 3999 : b2; } }
     if ((q = strstr(t, "\nauto_next="))) S.auto_next = atoi(q + 11) == 1;
     if ((q = strstr(t, "\ntab="))) S.tab = atoi(q + 5) >= 0 && atoi(q + 5) <= 2 ? atoi(q + 5) : 0;
     if ((q = strstr(t, "\nshow_get="))) S.show_get = atoi(q + 10) == 1;
@@ -2797,10 +2830,7 @@ static int gui(int argc, char **argv) {
         if (shot) { rc.right = W; rc.bottom = H; }
         if (S.empty) empty_frame(ctx, rc.right > 200 ? rc.right : W, rc.bottom > 200 ? rc.bottom : H);
         else gui_frame(ctx, rc.right > 200 ? rc.right : W, rc.bottom > 200 ? rc.bottom : H);
-        {   /* a changed setting: a new generation, the shown round made again in the background */
-            static ShrinkOpt last; static int have;
-            if (!have || memcmp(&last, &S.opt, sizeof last)) { if (have) { InterlockedIncrement(&S.optgen); kick_reshape(); if (S.own_opt) item_opt_save(S.item); } last = S.opt; have = 1; }
-        }
+        opt_check();      /* a changed setting: a new generation, the shown round made again in the background */
         if (!S.empty) queue_tick();
         nk_gdi_render(nk_rgb(30, 32, 38));
         frames++;
