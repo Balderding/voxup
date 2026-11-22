@@ -504,7 +504,8 @@ static struct {
     double up_turn; char up_note[80];           /* the turn it was made with; why there is none */
     HBITMAP bm_orig, bm_tool, bm_up, pv_up, pv_draw, pv_small, pv_orig; int pv_for, pv_w, pv_h; LONG pv_gen;
     HBITMAP bm_mini;                            /* the original at 32 x 32, in each picture's corner */
-    int undo_item, undo_had[4]; char undo_stamp[32];   /* the last keep: the item, which game pictures it replaced */
+    int undo_item, undo_had[4]; char undo_stamp[32];   /* the keep being undone: the item, which game pictures it replaced */
+    struct { int kind, item, had[4]; char stamp[32]; ShrinkOpt opt; } undo[64]; int nundo;   /* B5: 1 a keep, 2 the settings before a change */
     char keptinfo[200];
     volatile LONG busy, stop; int drawing_round;
     CRITICAL_SECTION cs; char status[600];
@@ -1509,11 +1510,23 @@ static void start_round(void) {
     th = CreateThread(NULL, 0, worker, NULL, 0, NULL);
     if (th) CloseHandle(th); else { InterlockedExchange(&S.busy, 0); status("Could not start the drawing thread: %s", vlog_errno()); }
 }
+static int UNDOING;
 /* a shrink setting changed: a new generation, the shown round made again (the main loop each frame; keep() too, so a
    key that changes a setting and Enter in the same batch keep the new one, review 2 P3-5) */
 static void opt_check(void) {
-    static ShrinkOpt last; static int have;
-    if (!have || memcmp(&last, &S.opt, sizeof last)) { if (have) { InterlockedIncrement(&S.optgen); kick_reshape(); if (S.own_opt) item_opt_save(S.item); } last = S.opt; have = 1; }
+    static ShrinkOpt last; static int have, last_item = -1; static DWORD last_t;
+    if (!have || memcmp(&last, &S.opt, sizeof last)) {
+        if (have) {
+            InterlockedIncrement(&S.optgen); kick_reshape(); if (S.own_opt) item_opt_save(S.item);
+            if (!UNDOING && last_item == S.item && (GetTickCount() - last_t > 700 || !S.nundo || S.undo[S.nundo - 1].kind != 2)) {
+                int u; if (S.nundo == 64) { memmove(&S.undo[0], &S.undo[1], sizeof S.undo[0] * 63); S.nundo--; }
+                u = S.nundo++; S.undo[u].kind = 2; S.undo[u].item = S.item; S.undo[u].opt = last;     /* the settings from before */
+            }
+            last_t = GetTickCount();
+        }
+        last = S.opt; have = 1;
+    }
+    last_item = S.item; UNDOING = 0;
 }
 static void keep(void) {
     Shot *s; char dst[MAX_PATH], bk[MAX_PATH], line[6000], d[4096], stamp[32], how[600]; int i, ok = 1, rw, rh; unsigned char *px; time_t t = time(NULL); struct tm *tm = localtime(&t);
@@ -1527,6 +1540,12 @@ static void keep(void) {
         if (!s->drw) { char sp[MAX_PATH]; shotpath(S.item, s, 0, sp, sizeof sp); status("The drawing %s is gone: not kept (its sprite would be the old one).", sp); return; }
     }
     strftime(stamp, sizeof stamp, "%Y-%m-%d_%H%M%S", tm);
+    {   /* two keeps in the same second get their own backup folders (else the second's backup overwrites the first's
+           and undoing both cannot put the picture from before back; B5) */
+        static char prev[32]; static int dup; char base[32]; snprintf(base, sizeof base, "%s", stamp);
+        if (!strcmp(base, prev)) snprintf(stamp + strlen(stamp), sizeof stamp - strlen(stamp), "-%d", ++dup); else dup = 0;
+        snprintf(prev, sizeof prev, "%s", base);
+    }
     if (!s->res) return;
     EnterCriticalSection(&S.cs); rw = s->rw; rh = s->rh; px = xmalloc((size_t)rw * rh * 4); memcpy(px, s->res, (size_t)rw * rh * 4); LeaveCriticalSection(&S.cs);
     shrink_describe(&S.opt, how, sizeof how);
@@ -1560,6 +1579,8 @@ static void keep(void) {
     snprintf(line, sizeof line, "%s seed %u (round %d, %dx%d, %s, %s)", S.m[s->model].name, s->seed, S.cur + 1, rw, rh, how, stamp); write_all(dst, line, strlen(line));
     S.kept[S.item] = 1; read_kept(S.item);
     S.undo_item = S.item; snprintf(S.undo_stamp, sizeof S.undo_stamp, "%s", stamp);
+    {   int u; if (S.nundo == 64) { memmove(&S.undo[0], &S.undo[1], sizeof S.undo[0] * 63); S.nundo--; }
+        u = S.nundo++; S.undo[u].kind = 1; S.undo[u].item = S.item; memcpy(S.undo[u].had, S.undo_had, sizeof S.undo_had); snprintf(S.undo[u].stamp, sizeof S.undo[u].stamp, "%s", stamp); }
     S.nkeeps++;
     if (ok) status("Kept %s seed %u as %03d's new picture (%s%s).", S.m[s->model].name, s->seed, S.item, GAMEDIRS[0], N_GAME > 1 ? " and the other game folders" : "");
     else status("Keep failed for part of it: %s", vlog_last());
@@ -1567,8 +1588,9 @@ static void keep(void) {
 /* the last keep taken back: each game folder gets its picture from before (backup\STAMP); where there was none, the
    kept picture is moved to backup\STAMP-undone (nothing is deleted). kept.txt becomes kept-undone.txt */
 static void undo_keep(void) {
-    char dst[MAX_PATH], bk[MAX_PATH], un[MAX_PATH], line[300]; int i, ok = 1, item = S.undo_item;
+    char dst[MAX_PATH], bk[MAX_PATH], un[MAX_PATH], line[300]; int i, ok = 1, item = S.undo_item, earlier = 0;
     if (item < 0) return;
+    for (i = 0; i < S.nundo; i++) earlier |= S.undo[i].kind == 1 && S.undo[i].item == item;   /* an earlier keep of it is still on the stack */
     for (i = 0; i < N_GAME; i++) {
         snprintf(dst, sizeof dst, "%s\\%03d.png", GAMEDIRS[i], item);
         snprintf(un, sizeof un, "%s\\backup\\%s-undone\\%s", WORK, S.undo_stamp, GAMETAG[i]); mkdirs(un);
@@ -1581,15 +1603,35 @@ static void undo_keep(void) {
     }
     itemdir(item, dst, sizeof dst); strcat(dst, "\\kept.txt");
     itemdir(item, un, sizeof un); strcat(un, "\\kept-undone.txt");
-    if (exists(dst)) MoveFileExA(dst, un, MOVEFILE_REPLACE_EXISTING);
+    if (!earlier && exists(dst)) MoveFileExA(dst, un, MOVEFILE_REPLACE_EXISTING);
     snprintf(line, sizeof line, "%s  %03d UNDONE (the pictures from before put back; the kept one in backup\\%s-undone)", S.undo_stamp, item, S.undo_stamp);
     snprintf(dst, sizeof dst, "%s\\keep.txt", WORK); append_line(dst, line);
-    S.kept[item] = 0; if (item == S.item) read_kept(item);
+    S.kept[item] = (unsigned char)earlier; if (item == S.item) read_kept(item);
     S.undo_item = -1;
     if (ok) status("%03d: the keep is undone; the picture from before is back in the game folders.", item);
     else status("Undo failed for part of it: %s", vlog_last());
 }
 
+/* Ctrl+Z: the last thing done this session, a keep or a setting change (B5) */
+static void undo_any(void) {
+    int u;
+    if (!S.nundo || S.busy) return;
+    u = --S.nundo;
+    if (S.undo[u].kind == 1) {
+        S.undo_item = S.undo[u].item; memcpy(S.undo_had, S.undo[u].had, sizeof S.undo_had); snprintf(S.undo_stamp, sizeof S.undo_stamp, "%s", S.undo[u].stamp);
+        undo_keep();
+    } else if (S.undo[u].item == S.item) {
+        char d[600]; S.opt = S.undo[u].opt; UNDOING = 1;
+        shrink_describe(&S.opt, d, sizeof d); vlog(VLOG_INFO, "undo", "settings back to before: %s", d);
+        status("Settings back to how they were (Ctrl+Z again goes further back).");
+    } else status("That setting change was on item %03d: go there to undo it.", S.undo[u].item), S.nundo++;
+}
+static const char *undo_what(char *b, size_t n) {
+    if (!S.nundo) { b[0] = 0; return b; }
+    if (S.undo[S.nundo - 1].kind == 1) snprintf(b, n, "Undo the keep of %03d (Ctrl+Z)", S.undo[S.nundo - 1].item);
+    else snprintf(b, n, "Undo the setting change (Ctrl+Z)");
+    return b;
+}
 /* ---------------------------------------------------------------- the item filter (the Find box): words, all must fit:
    a number (the item's number starts with it), kept, new (not kept), tilted, queued, or a part of the name */
 static int item_tilted(int k) {
@@ -1772,7 +1814,7 @@ static int hotkey(int vk) {
     case VK_SPACE: if (!busy) start_round(); return 1;
     case VK_RETURN: case 'K': if (!ctrl) keep_next(); return 1;
     case VK_DELETE: case 'X': redraw_one(S.sel); return 1;
-    case 'Z': if (ctrl && !busy && S.undo_item >= 0) undo_keep(); return ctrl;
+    case 'Z': if (ctrl && !busy) undo_any(); return ctrl;
     case VK_ESCAPE: if (busy && !S.stop) { InterlockedExchange(&S.stop, 1); status("Stopping after this picture...");
 #if SD_BUILT
                         if (SDX_DRAWING && SDX) sd_cancel_generation(SDX, SD_CANCEL_ALL);
@@ -2505,7 +2547,7 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
             if (nk_input_is_mouse_click_down_in_rect(&ctx->input, NK_BUTTON_LEFT, kb, nk_true)) S.keys_open = !S.keys_open;
             if (S.keys_open) {
                 nk_ext_wrap_label(ctx, "Click: look at it   Double-click / Enter: keep   Right-click / Del: draw that one again   Space / Ctrl+Enter: draw   Esc: stop", DIM, S.ing);
-                nk_ext_wrap_label(ctx, "Arrows: choose   PgUp/PgDn: item   Home/End: round   Ctrl+Z: undo keep   Ctrl+F: find   Q / R: queue / run it   1 2 3: panels   Ctrl+[ Ctrl+]: fold a side   F1..: presets", DIM, S.ing);
+                nk_ext_wrap_label(ctx, "Arrows: choose   PgUp/PgDn: item   Home/End: round   Ctrl+Z: undo   Ctrl+F: find   Q / R: queue / run it   1 2 3: panels   Ctrl+[ Ctrl+]: fold a side   F1..: presets", DIM, S.ing);
             }
         }
         for (r = 0; R && r * S.per < R->n; r++) {
@@ -2594,11 +2636,11 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
             }
             nk_layout_row_dynamic(ctx, 20, 1); nk_label_colored(ctx, "The model's drawing", NK_TEXT_LEFT, DIM);
             nk_layout_row_static(ctx, 192, 192, 1); if (S.pv_draw) nk_image(ctx, nkimg(S.pv_draw, 192, 192));
-            if (S.undo_item >= 0) { nk_layout_row_dynamic(ctx, 28, 1); if (button(ctx, "Undo the last keep (Ctrl+Z)", 0, !busy)) undo_keep(); }   /* this session only */
+            if (S.nundo) { char ub[64]; nk_layout_row_dynamic(ctx, 28, 1); if (button(ctx, undo_what(ub, sizeof ub), 0, !busy)) undo_any(); }   /* this session only */
             s_check(ctx, "After Keep: the next new item", &S.auto_next);
         } else {
             nk_label_colored(ctx, "Click a picture to choose it (or the arrow keys).", NK_TEXT_LEFT, DIM);
-            if (S.undo_item >= 0) { nk_layout_row_dynamic(ctx, 28, 1); if (button(ctx, "Undo the last keep (Ctrl+Z)", 0, !busy)) undo_keep(); nk_layout_row_dynamic(ctx, 20, 1); }
+            if (S.nundo) { char ub[64]; nk_layout_row_dynamic(ctx, 28, 1); if (button(ctx, undo_what(ub, sizeof ub), 0, !busy)) undo_any(); nk_layout_row_dynamic(ctx, 20, 1); }
             s_check(ctx, "After Keep: the next new item", &S.auto_next); nk_layout_row_dynamic(ctx, 20, 1);
             nk_layout_row_dynamic(ctx, 20, 1); nk_label_colored(ctx, "The original", NK_TEXT_LEFT, DIM);
             nk_layout_row_static(ctx, 192, 192, 1); if (S.pv_orig) nk_image(ctx, nkimg(S.pv_orig, 192, 192));
@@ -2798,8 +2840,8 @@ static int gui(int argc, char **argv) {
             else if (!strcmp(argv[i], "--set") && i + 1 < argc && nsets < 64) sets[nsets++] = argv[++i];   /* a shrink setting, key=value */
             else if (!strcmp(argv[i], "--tab") && i + 1 < argc) test_tab = atoi(argv[++i]);                 /* the right panel shown (0-2), over pick.ini's */
             else if (!strcmp(argv[i], "--from") && i + 1 < argc) test_from = argv[++i];               /* tool, upright or original */
-            else if (!strcmp(argv[i], "--keep")) test_keep = 1;     /* Keep pressed too, into out\pick\selftest-game, never the game */
-            else if (!strcmp(argv[i], "--undo")) test_undo = 1;     /* and that keep undone again */
+            else if (!strcmp(argv[i], "--keep")) test_keep++;        /* may repeat: Keep pressed that many times */     /* Keep pressed too, into out\pick\selftest-game, never the game */
+            else if (!strcmp(argv[i], "--undo")) test_undo++;        /* may repeat: Ctrl+Z that many times (after the keeps) */     /* and that keep undone again */
             else if (!strcmp(argv[i], "--redraw") && i + 1 < argc) test_redraw = atoi(argv[++i]);   /* that picture thrown out, drawn again */
             else if (!strcmp(argv[i], "--find") && i + 1 < argc) test_find = argv[++i];             /* the Find box, Enter pressed */
             else if (!strcmp(argv[i], "--click") && i + 1 < argc && ntest_clk < 8) { test_clk[ntest_clk][2] = 1; sscanf(argv[++i], "%d,%d,%d", &test_clk[ntest_clk][0], &test_clk[ntest_clk][1], &test_clk[ntest_clk][2]); ntest_clk++; }   /* X,Y[,N]: N 1 a click, 2 a double-click, 3 a right-click */
@@ -2935,10 +2977,11 @@ static int gui(int argc, char **argv) {
             if (test_redraw >= 0 && S.nr) { redraw_one(test_redraw); test_redraw = -1; continue; }
             if (ndraw && !drawn) { drawn = 1; if (round_size() > 0) { start_round(); continue; } vlog(VLOG_ERR, "selftest", "--draw: no ready model to draw with"); }
             if (S.nr && S.sel < 0) { for (i = 0; i < S.r[S.cur].n; i++) if (S.r[S.cur].s[i].st == ST_DONE) { S.sel = i; break; } if (S.sel >= 0) continue; }
+            if (!test_keep && test_undo) { undo_any(); test_undo--; continue; }
             if (test_keep && S.sel >= 0) {
                 static char g0[MAX_PATH], g1[MAX_PATH];
                 snprintf(g0, sizeof g0, "%s\\selftest-game\\data", WORK); snprintf(g1, sizeof g1, "%s\\selftest-game\\dist", WORK);
-                GAMEDIRS[0] = g0; GAMEDIRS[1] = g1; N_GAME = 2; snprintf(GAMETAG[0], 16, "data"); snprintf(GAMETAG[1], 16, "dist"); keep(); if (test_undo) undo_keep(); test_keep = 0; continue;
+                GAMEDIRS[0] = g0; GAMEDIRS[1] = g1; N_GAME = 2; snprintf(GAMETAG[0], 16, "data"); snprintf(GAMETAG[1], 16, "dist"); keep(); test_keep--; continue;
             }
             if (frames > 6 && S.empty) { save_bmp(shot, W, H); vlog(VLOG_INFO, "selftest", "wrote %s (the empty start)", shot); break; }
             if (frames > 6) { save_bmp(shot, W, H); vlog(VLOG_INFO, "selftest", "wrote %s (%d x %d, panels %d | grid %d columns | %d%s%s)", shot, W, H, S.split[0], S.per, S.split[1], S.fold[0] ? ", left folded" : "", S.fold[1] ? ", right folded" : ""); break; }
