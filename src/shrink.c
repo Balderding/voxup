@@ -29,7 +29,8 @@
 #include "shrink.h"
 
 const char *const METHOD_NAMES[M_COUNT] = { "Lanczos", "Nearest", "Box (area)", "Bilinear", "Bicubic", "Mitchell", "Gaussian",
-                                            "Median", "Majority", "DPID (2016)", "SAID (2025)", "Superpixels (2012)" };
+                                            "Median", "Majority", "DPID (2016)", "SAID (2025)", "Superpixels (2012)",
+                                            "2-step (4x, 2x, 1x majority)" };
 
 void shrink_defaults(ShrinkOpt *o) {
     memset(o, 0, sizeof *o);
@@ -56,11 +57,13 @@ static const Key KEYS[] = {
     K(method, 0, M_COUNT - 1), K(dpid_lambda, 0, 300), K(said_gamma, 0, 400), K(said_alpha, 0, 200), K(said_beta, 0, 200),
     K(sp_m, 1, 100), K(sp_iter, 1, 30),
     K(pinholes, 0, 3), K(colours, 0, 5), K(ncol, 2, 32), K(dist, 0, 2), K(dither, 0, 3), K(dither_amt, 0, 100),
-    K(black, 0, 128), K(pink, 0, 100), K(peel, 0, 4), K(orphans, 0, 1), K(jaggies, 0, 1), K(outline, 0, 3), K(othick, 1, 4), K(edge, 0, 1),
+    K(black, 0, 128), K(pink, 0, 100), K(peel, 0, 4), K(orphans, 0, 1), K(jaggies, 0, 1), K(outline, 0, 4), K(othick, 1, 4), K(edge, 0, 1),
+    K(flood, 0, 1), K(linear, 0, 1), K(silhouette, 0, 1), K(regions, 0, 1), K(notch, 0, 1), K(blocks, 0, 1),
 };
 const char *const SHRINK_KEYS[] = { "size", "cw", "ch", "fit", "margin", "bg_dist", "magenta", "alpha_cut", "contrast", "brightness",
     "saturation", "smooth", "sharpen", "method", "dpid_lambda", "said_gamma", "said_alpha", "said_beta", "sp_m", "sp_iter",
-    "pinholes", "colours", "ncol", "dist", "dither", "dither_amt", "black", "pink", "peel", "orphans", "jaggies", "outline", "othick", "edge", NULL };
+    "pinholes", "colours", "ncol", "dist", "dither", "dither_amt", "black", "pink", "peel", "orphans", "jaggies", "outline", "othick", "edge",
+    "flood", "linear", "silhouette", "regions", "notch", "blocks", NULL };
 int shrink_set(ShrinkOpt *o, const char *key, int v) {
     size_t i;
     for (i = 0; i < sizeof KEYS / sizeof KEYS[0]; i++) if (!strcmp(KEYS[i].key, key)) {
@@ -504,6 +507,22 @@ int shrink(const unsigned char *drw, int dw, int dh, const unsigned char *orig, 
         int bg = d < o->bg_dist || (o->magenta && r - g > 90 && b - g > 90);
         cut[i * 4] = (unsigned char)r; cut[i * 4 + 1] = (unsigned char)g; cut[i * 4 + 2] = (unsigned char)b; cut[i * 4 + 3] = bg ? 0 : 255;
     }
+    if (o->flood) {     /* also cleared: near-background pixels joined to the border (looser distance, any pink tint) */
+        int *q = xm(sizeof(int) * n), qh = 0, qt = 0; unsigned char *seen = calloc(n, 1);
+        #define NEARBG(k) (sqrt((drw[(k) * 3] - med[0]) * (drw[(k) * 3] - med[0]) + (drw[(k) * 3 + 1] - med[1]) * (drw[(k) * 3 + 1] - med[1]) + \
+                          (drw[(k) * 3 + 2] - med[2]) * (drw[(k) * 3 + 2] - med[2])) < o->bg_dist * 1.4 || \
+                          (drw[(k) * 3] - drw[(k) * 3 + 1] > 40 && drw[(k) * 3 + 2] - drw[(k) * 3 + 1] > 40))
+        for (x = 0; x < dw; x++) { int a = x, b = (dh - 1) * dw + x; if (NEARBG(a) && !seen[a]) { seen[a] = 1; q[qt++] = a; } if (NEARBG(b) && !seen[b]) { seen[b] = 1; q[qt++] = b; } }
+        for (y = 0; y < dh; y++) { int a = y * dw, b = y * dw + dw - 1; if (NEARBG(a) && !seen[a]) { seen[a] = 1; q[qt++] = a; } if (NEARBG(b) && !seen[b]) { seen[b] = 1; q[qt++] = b; } }
+        while (qh < qt) {
+            int k = q[qh++], kx = k % dw, ky = k / dw, d2; static const int D[4][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
+            cut[k * 4 + 3] = 0;
+            for (d2 = 0; d2 < 4; d2++) { int xx = kx + D[d2][0], yy = ky + D[d2][1], kk = yy * dw + xx;
+                if (xx >= 0 && yy >= 0 && xx < dw && yy < dh && !seen[kk] && NEARBG(kk)) { seen[kk] = 1; q[qt++] = kk; } }
+        }
+        #undef NEARBG
+        free(q); free(seen);
+    }
     if (!bbox_a(cut, dw, dh, 0, &cx0, &cy0, &cx1, &cy1) || !bbox_a(orig, ow, oh, 0, &bx0, &by0, &bx1, &by1)) { free(cut); return 0; }
     cw = cx1 - cx0; chh = cy1 - cy0;
     /* 3. fit: the original's box scaled to the sprite, the whole sprite, or stretched; the margin kept free */
@@ -515,7 +534,7 @@ int shrink(const unsigned char *drw, int dw, int dh, const unsigned char *orig, 
     bw = x1 - x0; bh = y1 - y0;
     {
         double s = (double)bw / cw < (double)bh / chh ? (double)bw / cw : (double)bh / chh;
-        float *pl[4], *rs[4]; unsigned char *crop;
+        float *pl[4], *rs[4]; unsigned char *crop, *sil = NULL; int lin;
         if (o->fit == FIT_STRETCH) { w = bw; h = bh; }
         else { w = (int)nearbyint(cw * s); if (w < 1) w = 1; h = (int)nearbyint(chh * s); if (h < 1) h = 1; }
         crop = xm((size_t)cw * chh * 4);
@@ -524,10 +543,17 @@ int shrink(const unsigned char *drw, int dw, int dh, const unsigned char *orig, 
         /* 2. before shrinking (needs the scale for the sharpening) */
         before(crop, cw, chh, o, (double)cw / w);
         for (c = 0; c < 4; c++) pl[c] = xm(sizeof(float) * (size_t)cw * chh);
-        for (i = 0; i < cw * chh; i++) { double a = crop[i * 4 + 3]; for (c = 0; c < 3; c++) pl[c][i] = (float)(crop[i * 4 + c] * (a / 255)); pl[3][i] = (float)a; }
+        lin = o->linear && o->method != M_SUPERPIXEL;     /* superpixels measure in Lab from sRGB themselves */
+        for (i = 0; i < cw * chh; i++) { double a = crop[i * 4 + 3]; for (c = 0; c < 3; c++) pl[c][i] = (float)((lin ? lin_t[crop[i * 4 + c]] * 255.0 : crop[i * 4 + c]) * (a / 255)); pl[3][i] = (float)a; }
         free(crop);
         /* 4. the method */
-        if (o->method <= M_GAUSS && o->method != M_NEAREST) {
+        if (o->method == M_TWOSTEP) {         /* Lanczos to 4x, then the commonest colour 4x -> 2x -> 1x */
+            float *a4[4], *a2[4];
+            for (c = 0; c < 4; c++) { a4[c] = resize_k(pl[c], cw, chh, w * 4, h * 4, k_lanczos, 3.0); a2[c] = xm(sizeof(float) * (size_t)w * h * 4); rs[c] = xm(sizeof(float) * (size_t)w * h); }
+            m_cells(a4, w * 4, h * 4, w * 2, h * 2, M_MAJORITY, a2);
+            m_cells(a2, w * 2, h * 2, w, h, M_MAJORITY, rs);
+            for (c = 0; c < 4; c++) { free(a4[c]); free(a2[c]); }
+        } else if (o->method <= M_GAUSS && o->method != M_NEAREST) {
             KernFn f = o->method == M_BOX ? k_box : o->method == M_BILINEAR ? k_tri : o->method == M_BICUBIC ? k_cubic : o->method == M_MITCHELL ? k_mitchell : o->method == M_GAUSS ? k_gauss : k_lanczos;
             double sup = o->method == M_BOX ? 0.5 : o->method == M_BILINEAR ? 1.0 : o->method == M_LANCZOS ? 3.0 : 2.0;
             for (c = 0; c < 4; c++) rs[c] = resize_k(pl[c], cw, chh, w, h, f, sup);
@@ -539,20 +565,38 @@ int shrink(const unsigned char *drw, int dw, int dh, const unsigned char *orig, 
             else m_cells(pl, cw, chh, w, h, o->method, rs);
         }
         for (c = 0; c < 4; c++) free(pl[c]);
+        if (o->silhouette) {      /* the shape on its own: half covered, or a thin line (covered more than both
+                                     neighbours across it, at least a fifth covered) */
+            unsigned char *keep = xm((size_t)w * h);
+            for (y = 0; y < h; y++) for (x = 0; x < w; x++) {
+                float a = rs[3][(size_t)y * w + x];
+                #define AT(xx, yy) ((xx) < 0 || (yy) < 0 || (xx) >= w || (yy) >= h ? 0.0f : rs[3][(size_t)(yy) * w + (xx)])
+                int ridge = a >= 51 && ((a > AT(x - 1, y) && a > AT(x + 1, y)) || (a > AT(x, y - 1) && a > AT(x, y + 1)) ||
+                                        (a > AT(x - 1, y - 1) && a > AT(x + 1, y + 1)) || (a > AT(x + 1, y - 1) && a > AT(x - 1, y + 1)));
+                #undef AT
+                keep[(size_t)y * w + x] = a >= 128 || ridge;
+            }
+            sil = keep;
+        }
         memset(out, 0, (size_t)W * H * 4);
         ox = x0 + (int)floor((bw - w) / 2.0); oy = y0 + (int)floor((bh - h) / 2.0);
         for (y = 0; y < h; y++) for (x = 0; x < w; x++) {
             size_t k = (size_t)y * w + x; float al = rs[3][k], m = al > 1.0f ? al : 1.0f; unsigned char px[4];
-            for (c = 0; c < 3; c++) { float v = rs[c][k] * 255 / m; v = v < 0 ? 0 : v > 255 ? 255 : v; px[c] = (unsigned char)(int)(double)v; }
-            px[3] = al >= o->alpha_cut ? 255 : 0;
+            for (c = 0; c < 3; c++) {
+                float v = rs[c][k] * 255 / m; v = v < 0 ? 0 : v > 255 ? 255 : v;
+                if (lin) { double l = v / 255.0; v = (float)(255.0 * (l <= 0.0031308 ? 12.92 * l : 1.055 * pow(l, 1 / 2.4) - 0.055)); }
+                px[c] = (unsigned char)(int)(double)v;
+            }
+            px[3] = sil ? (sil[k] ? 255 : 0) : al >= o->alpha_cut ? 255 : 0;
             if (!px[3]) px[0] = px[1] = px[2] = 0;
             if (oy + y >= 0 && oy + y < H && ox + x >= 0 && ox + x < W) memcpy(out + ((size_t)(oy + y) * W + ox + x) * 4, px, 4);
         }
         for (c = 0; c < 4; c++) free(rs[c]);
+        free(sil);
     }
     {
         unsigned char *on = xm((size_t)W * H), *m2 = xm((size_t)W * H);
-        int (*pal)[3] = xm(sizeof(int[3]) * (size_t)(ow * oh * 3 + 64)), np = 0, ninner = 0, usepal;
+        int (*pal)[3] = xm(sizeof(int[3]) * (size_t)(ow * oh * 3 + 64)), np = 0, ninner = 0, usepal, outl = o->outline == O_AUTO ? (orig_outlined(orig, ow, oh) ? O_BLACK4 : O_NONE) : o->outline;
         /* 5. pinholes */
         for (it = 0; it < o->pinholes; it++) {
             for (i = 0; i < W * H; i++) on[i] = out[i * 4 + 3] > 127;
@@ -590,7 +634,37 @@ int shrink(const unsigned char *drw, int dw, int dh, const unsigned char *orig, 
         if (o->colours == C_KMEANS) np = kmeans(out, W, H, o->ncol, pal, o->dist);
         if (o->colours == C_MEDIANCUT) np = mediancut(out, W, H, o->ncol, pal);
         usepal = o->colours == C_ORIGINAL || o->colours == C_SHADES || o->colours == C_KMEANS || o->colours == C_MEDIANCUT;
-        if (np) {
+        if (np && usepal && o->regions && !o->dither) {
+            /* by region: patches of like colour (Lab within 12 of the patch's first pixel, 4-connected) each take the
+               palette colour most of their pixels are nearest to (Lab) */
+            int *rg = xm(sizeof(int) * (size_t)W * H), *q = xm(sizeof(int) * (size_t)W * H), *vote = xm(sizeof(int) * (size_t)np), nr = 0, j;
+            double (*L)[3] = xm(sizeof(double[3]) * (size_t)W * H), (*plab)[3] = xm(sizeof(double[3]) * (size_t)np);
+            for (j = 0; j < np; j++) lab(pal[j][0], pal[j][1], pal[j][2], plab[j]);
+            for (i = 0; i < W * H; i++) {
+                unsigned char *p = out + (size_t)i * 4; rg[i] = -1;
+                if (p[3] < 128) continue;
+                if (o->black && p[0] < o->black && p[1] < o->black && p[2] < o->black) { p[0] = p[1] = p[2] = 0; rg[i] = -2; continue; }
+                lab(p[0], p[1], p[2], L[i]);
+            }
+            for (i = 0; i < W * H; i++) if (rg[i] == -1 && out[(size_t)i * 4 + 3] >= 128) {
+                int qh = 0, qt = 0, best = 0, k2, d2; static const int D[4][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
+                memset(vote, 0, sizeof(int) * (size_t)np);
+                rg[i] = nr; q[qt++] = i;
+                while (qh < qt) {
+                    int k = q[qh++], kx = k % W, ky = k / W; double bd = 1e300;
+                    for (j = 0; j < np; j++) { double e = (L[k][0] - plab[j][0]) * (L[k][0] - plab[j][0]) + (L[k][1] - plab[j][1]) * (L[k][1] - plab[j][1]) + (L[k][2] - plab[j][2]) * (L[k][2] - plab[j][2]); if (e < bd) { bd = e; best = j; } }
+                    vote[best]++;
+                    for (d2 = 0; d2 < 4; d2++) { int xx = kx + D[d2][0], yy = ky + D[d2][1], kk = yy * W + xx; double e;
+                        if (xx < 0 || yy < 0 || xx >= W || yy >= H || rg[kk] != -1 || out[(size_t)kk * 4 + 3] < 128) continue;
+                        e = (L[kk][0] - L[i][0]) * (L[kk][0] - L[i][0]) + (L[kk][1] - L[i][1]) * (L[kk][1] - L[i][1]) + (L[kk][2] - L[i][2]) * (L[kk][2] - L[i][2]);
+                        if (e < 144) { rg[kk] = nr; q[qt++] = kk; } }
+                }
+                for (j = 1, best = 0; j < np; j++) if (vote[j] > vote[best]) best = j;
+                for (k2 = 0; k2 < qt; k2++) { unsigned char *p = out + (size_t)q[k2] * 4; p[0] = (unsigned char)pal[best][0]; p[1] = (unsigned char)pal[best][1]; p[2] = (unsigned char)pal[best][2]; }
+                nr++;
+            }
+            free(rg); free(q); free(vote); free(L); free(plab);
+        } else if (np) {
             double (*pl)[3] = xm(sizeof(double[3]) * (size_t)np), (*plab)[3] = xm(sizeof(double[3]) * (size_t)np);
             float *err = xm(sizeof(float) * 3 * (size_t)W * H); static const int bayer[16] = { 0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5 };
             int dith = usepal ? o->dither : DI_NONE;
@@ -652,7 +726,7 @@ int shrink(const unsigned char *drw, int dw, int dh, const unsigned char *orig, 
         }
         /* 8c. without an outline, a smooth edge if wanted: whole pixels only. A clear pixel with 5+ of its 8
            neighbours filled is filled (the commonest of them); a filled edge pixel with 2 or fewer is cleared */
-        if (o->outline == O_NONE && o->edge) for (it = 0; it < 2; it++) {
+        if (outl == O_NONE && o->edge) for (it = 0; it < 2; it++) {
             unsigned char *cp = xm((size_t)W * H * 4); memcpy(cp, out, (size_t)W * H * 4);
             for (i = 0; i < W * H; i++) on[i] = cp[i * 4 + 3] > 127;
             for (y = 0; y < H; y++) for (x = 0; x < W; x++) {
@@ -670,21 +744,21 @@ int shrink(const unsigned char *drw, int dw, int dh, const unsigned char *orig, 
             free(cp);
         }
         /* 9. the outline, othick rings (the rings after the first take the colour of the ring inside them) */
-        if (o->outline != O_NONE) for (int ring = 0; ring < (o->othick < 1 ? 1 : o->othick); ring++) {
+        if (outl != O_NONE) for (int ring = 0; ring < (o->othick < 1 ? 1 : o->othick); ring++) {
             unsigned char *cp = xm((size_t)W * H * 4); memcpy(cp, out, (size_t)W * H * 4);
             for (i = 0; i < W * H; i++) on[i] = out[i * 4 + 3] > 127;
             for (y = 0; y < H; y++) for (x = 0; x < W; x++) {
                 int k = y * W + x, u, v, touch = 0; unsigned char *p = out + (size_t)k * 4;
                 if (on[k]) continue;
                 touch = nb4(on, W, H, x, y) > 0;
-                if (!touch && o->outline == O_BLACK8) for (v = -1; v <= 1; v += 2) for (u = -1; u <= 1; u += 2) { int xx = x + u, yy = y + v; if (xx >= 0 && yy >= 0 && xx < W && yy < H && on[yy * W + xx]) touch = 1; }
+                if (!touch && outl == O_BLACK8) for (v = -1; v <= 1; v += 2) for (u = -1; u <= 1; u += 2) { int xx = x + u, yy = y + v; if (xx >= 0 && yy >= 0 && xx < W && yy < H && on[yy * W + xx]) touch = 1; }
                 if (!touch) continue;
                 p[0] = p[1] = p[2] = 0; p[3] = 255;
                 if (ring > 0) {        /* an outer ring: the colour of the ring pixel beside it */
                     static const int D[4][2] = { { -1, 0 }, { 1, 0 }, { 0, -1 }, { 0, 1 } }; int d;
                     for (d = 0; d < 4; d++) { int xx = x + D[d][1], yy = y + D[d][0];
                         if (xx >= 0 && yy >= 0 && xx < W && yy < H && on[yy * W + xx]) { memcpy(p, cp + ((size_t)yy * W + xx) * 4, 3); break; } }
-                } else if (o->outline == O_SELECTIVE) {   /* a darker shade of the commonest coloured neighbour */
+                } else if (outl == O_SELECTIVE) {   /* a darker shade of the commonest coloured neighbour */
                     static const int D[4][2] = { { -1, 0 }, { 1, 0 }, { 0, -1 }, { 0, 1 } }; int d, bestn = 0, bi = -1, q, cand[4], nc = 0;
                     for (d = 0; d < 4; d++) { int xx = x + D[d][1], yy = y + D[d][0]; const unsigned char *t;
                         if (xx < 0 || yy < 0 || xx >= W || yy >= H || !on[yy * W + xx]) continue;
@@ -711,7 +785,59 @@ int shrink(const unsigned char *drw, int dw, int dh, const unsigned char *orig, 
             }
             if (!any) break;
         }
+        /* 8d. a black pixel biting into the body (colour above and below, colour on one side, black on the other) takes
+           the colour beside it; the same turned on its side */
+        if (o->notch) {
+            unsigned char *cp = xm((size_t)W * H * 4); memcpy(cp, out, (size_t)W * H * 4);
+            #define BK(xx, yy) (cp[((yy) * W + (xx)) * 4 + 3] > 127 && !(cp[((yy) * W + (xx)) * 4] | cp[((yy) * W + (xx)) * 4 + 1] | cp[((yy) * W + (xx)) * 4 + 2]))
+            #define CO(xx, yy) (cp[((yy) * W + (xx)) * 4 + 3] > 127 && !BK(xx, yy))
+            for (y = 1; y < H - 1; y++) for (x = 1; x < W - 1; x++) {
+                if (!BK(x, y)) continue;
+                if (CO(x, y - 1) && CO(x, y + 1) && CO(x - 1, y) != CO(x + 1, y) && (BK(x - 1, y) || BK(x + 1, y)))
+                    memcpy(out + ((size_t)y * W + x) * 4, cp + ((size_t)y * W + (CO(x + 1, y) ? x + 1 : x - 1)) * 4, 4);
+                else if (CO(x - 1, y) && CO(x + 1, y) && CO(x, y - 1) != CO(x, y + 1) && (BK(x, y - 1) || BK(x, y + 1)))
+                    memcpy(out + ((size_t)y * W + x) * 4, cp + ((size_t)(CO(x, y + 1) ? y + 1 : y - 1) * W + x) * 4, 4);
+            }
+            free(cp);
+        }
+        /* 8e. a 2 x 2 block of black: the one of its pixels with no clear neighbour and the most coloured ones takes the
+           colour of one of them (the outline stays one pixel wide) */
+        if (o->blocks) {
+            unsigned char *cp = xm((size_t)W * H * 4); memcpy(cp, out, (size_t)W * H * 4);
+            for (y = 0; y < H - 1; y++) for (x = 0; x < W - 1; x++) {
+                int k, best = -1, bn = 0, bsrc = -1;
+                if (!(BK(x, y) && BK(x + 1, y) && BK(x, y + 1) && BK(x + 1, y + 1))) continue;
+                for (k = 0; k < 4; k++) {
+                    int xx = x + (k & 1), yy = y + (k >> 1), d2, ncol = 0, clear = 0, src = -1; static const int D[4][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
+                    for (d2 = 0; d2 < 4; d2++) { int ax = xx + D[d2][0], ay = yy + D[d2][1];
+                        if (ax < 0 || ay < 0 || ax >= W || ay >= H || cp[(ay * W + ax) * 4 + 3] <= 127) { clear = 1; continue; }
+                        if (CO(ax, ay)) { ncol++; src = ay * W + ax; } }
+                    if (!clear && ncol > bn) { bn = ncol; best = yy * W + xx; bsrc = src; }
+                }
+                if (best >= 0) { memcpy(out + (size_t)best * 4, cp + (size_t)bsrc * 4, 4); memcpy(cp + (size_t)best * 4, cp + (size_t)bsrc * 4, 4); }
+            }
+            free(cp);
+            #undef BK
+            #undef CO
+        }
         free(on); free(m2); free(pal);
     }
     return 1;
+}
+/* the original has an outline: black fences its colours in (few colours face the background, black touches colour) */
+int orig_outlined(const unsigned char *rgba, int w, int h) {
+    int x, y, nb = 0, nc = 0, ex = 0, fe = 0, u, v;
+    for (y = 0; y < h; y++) for (x = 0; x < w; x++) {
+        const unsigned char *p = rgba + ((size_t)y * w + x) * 4; int op = p[3] > 0, bk = op && !(p[0] | p[1] | p[2]), bg4 = 0, col8 = 0;
+        if (!op) continue;
+        for (v = -1; v <= 1; v++) for (u = -1; u <= 1; u++) {
+            int xx = x + u, yy = y + v; const unsigned char *q;
+            if ((!u && !v) || xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+            q = rgba + ((size_t)yy * w + xx) * 4;
+            if ((!u || !v) && !q[3]) bg4 = 1;
+            if (q[3] && (q[0] | q[1] | q[2])) col8 = 1;
+        }
+        if (bk) { nb++; fe += col8; } else { nc++; ex += bg4; }
+    }
+    return nb > 0 && (double)ex / (nc > 1 ? nc : 1) < 0.15 && (double)fe / (nb > 1 ? nb : 1) > 0.9;
 }

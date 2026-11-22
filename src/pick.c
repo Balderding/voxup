@@ -5,7 +5,8 @@
                                    as often as wanted, click one, Keep -> NNN.png in voxup.ini's game folders
      voxup IN.raw OUT.raw ...      the upscaler's command line, as before (voxup.c)
      voxup --to32 DRAWING.png ITEM OUT.png      one drawing to the 32 x 32 sprite (the window's own step; for checks)
-     voxup --selftest SHOT.bmp [ITEM] [--get ID] [--draw ID N [ID N ...]] [--keep]   the window off screen (never
+     voxup --upright SPRITE.png OUT.png [turn= style= slim= outline= big=]   the sprite stood upright at 32 x 32
+     voxup --selftest SHOT.bmp [ITEM] [--get ID] [--draw ID N [ID N ...]] [--keep [--undo]] [--find T] [--redraw N] [--key CODE]   the window off screen (never
                                    shown): optionally gets a model, draws for real, then writes the window's picture
      voxup --models                the model list: which are ready, what each still needs
 
@@ -34,6 +35,7 @@
 #include "third_party/stb_image_write.h"
 #include "vlog.h"
 #include "shrink.h"
+#include "upright.h"
 /* the built-in engine (stable-diffusion.cpp, built in with -DVOXUP_SD): models drawn inside voxup, no ComfyUI */
 #ifdef VOXUP_SD
 #include "stable-diffusion.h"
@@ -323,6 +325,42 @@ static int shrink_cli(int argc, char **argv) {
     if (!stbi_write_png(argv[4], W, H, 4, out, W * 4)) { vlog(VLOG_ERR, "shrink", "could not write %s", argv[4]); return 1; }
     return 0;
 }
+/* "turn=auto|DEG style=classic|centred slim=off|sword|shaft outline=auto|on|off" into o; 0 for a word it does not know */
+static int upright_set(UprightOpt *o, const char *kv) {
+    char k[16], v[24];
+    if (sscanf(kv, "%15[^=]=%23s", k, v) != 2) return 0;
+    if (!strcmp(k, "turn")) { if (!strcmp(v, "auto")) o->auto_turn = 1; else { o->auto_turn = 0; o->turn = atof(v); } }
+    else if (!strcmp(k, "style")) o->centred = !strcmp(v, "centred");
+    else if (!strcmp(k, "slim")) o->slim = !strcmp(v, "sword") ? UP_SLIM_SWORD : !strcmp(v, "shaft") ? UP_SLIM_SHAFT : UP_SLIM_OFF;
+    else if (!strcmp(k, "outline")) o->outline = !strcmp(v, "on") ? 1 : !strcmp(v, "off") ? 0 : -1;
+    else return 0;
+    return 1;
+}
+/* voxup --upright SPRITE.png OUT.png [turn=..] [style=..] [slim=..] [outline=..] [big=PX]: the sprite stood upright at
+   32 x 32 (with big=PX: the large clean picture the models get instead) */
+static int upright_cli(int argc, char **argv) {
+    UprightOpt o; int w, h, i, big = 0, ok; unsigned char *d, out[32 * 32 * 4]; double turn = 0, scale = 0;
+    if (argc < 4) { fprintf(stderr, "voxup --upright SPRITE.png OUT.png [turn=auto|DEG] [style=classic|centred] [slim=off|sword|shaft] [outline=auto|on|off] [big=PX]\n"); return 255; }
+    upright_defaults(&o);
+    for (i = 4; i < argc; i++) {
+        if (!strncmp(argv[i], "big=", 4)) big = atoi(argv[i] + 4);
+        else if (!upright_set(&o, argv[i])) { vlog(VLOG_ERR, "upright", "not a setting: %s", argv[i]); return 255; }
+    }
+    if (!(d = load_rgba(argv[2], &w, &h))) return 1;
+    if (big > 0) {
+        int bw, bh; unsigned char *b;
+        if (o.auto_turn) { double t, el; int tl; upright_measure(d, w, h, &t, &el, &tl); o.turn = -t; }
+        b = upright_big(d, w, h, o.turn, big, &bw, &bh);
+        ok = b && stbi_write_png(argv[3], bw, bh, 4, b, bw * 4); free(b);
+    } else {
+        if (!upright_make(d, w, h, &o, out, &turn, &scale)) { vlog(VLOG_ERR, "upright", "%s: nothing to stand up", argv[2]); stbi_image_free(d); return 1; }
+        ok = stbi_write_png(argv[3], 32, 32, 4, out, 32 * 4);
+        printf("turn %.1f scale %.2f\n", turn, scale);
+    }
+    stbi_image_free(d);
+    if (!ok) { vlog(VLOG_ERR, "upright", "could not write %s", argv[3]); return 1; }
+    return 0;
+}
 /* voxup --shrinkcheck SEEDSDIR: shrink.c with its defaults against to32 (both colour ways) on every drawing there */
 static int shrinkcheck_cli(int argc, char **argv) {
     WIN32_FIND_DATAA fd, fi; HANDLE h, hi; char pat[MAX_PATH]; int total = 0, bad = 0;
@@ -453,12 +491,26 @@ static struct {
     unsigned char orig[16 * 16 * 4], tool[32 * 32 * 4], up[32 * 32 * 4];
     unsigned char upfit[16 * 16 * 4];           /* the upright picture's box at 16 x 16, in the original's colours */
     int has_up, from, upfrom;                   /* an upright picture found; what the models are given (FROM_*) */
+    /* the upright picture: hand-made (an upright = folder) or made here (NNN\upright.png, settings in NNN\upright.txt) */
+    int up_hand, up_mode, up_style, up_slim;    /* UPM_*, 0 classic / 1 centred, UP_SLIM_* */
+    double up_turn; char up_note[80];           /* the turn it was made with; why there is none */
     HBITMAP bm_orig, bm_tool, bm_up, pv_up, pv_draw, pv_small, pv_orig; int pv_for, pv_w, pv_h; LONG pv_gen;
+    HBITMAP bm_mini;                            /* the original at 32 x 32, in each picture's corner */
+    int undo_item, undo_had[4]; char undo_stamp[32];   /* the last keep: the item, which game pictures it replaced */
     char keptinfo[200];
     volatile LONG busy, stop; int drawing_round;
     CRITICAL_SECTION cs; char status[600];
     HWND wnd; HANDLE comfy, job; int upitem; char upname[128];
     int engine; char sdstep[40];                /* 0: models with sd lines drawn by the built-in engine, 1: all by ComfyUI */
+    /* 2026-11-21, fewer clicks: keys (none while a text box is typed in), the item filter, the queue, presets,
+       the item's own settings, the Compare tab, each picture's progress */
+    int typing, find_focus, find_typing, auto_next; char find[48]; signed char tilt[512];   /* tilt: -1 not measured */
+    int queue[512], nq, qrun;                   /* items to draw a round of, in turn (work\queue.txt) */
+    int own_opt; ShrinkOpt gopt; int opt_loaded; /* the item has its own settings (NNN\shrink.txt); everyone else's */
+    char pname[16][32], pset[16][400]; int np, nbuiltin; char newpreset[32];
+    int cmp_for; LONG cmp_gen; HBITMAP cmp_bm[17]; int cmp_w[17], cmp_h[17]; char cmp_score[17][64];
+    volatile LONG sd_step, sd_steps; DWORD draw_t0; DWORD avg_ms[MAXM]; int nkeeps;
+    int show_get, nget, unfocus; WINDOWPLACEMENT wp; int have_wp;   /* models to get shown; Esc in a text box; the window's place */
 } S;
 /* drawn inside voxup: the built-in engine is in this voxup, the model has its lines, and the engine is chosen (or the
    model has no ComfyUI graph) */
@@ -608,6 +660,12 @@ static void set_res(Shot *s, const unsigned char *px, int w, int h, LONG gen) {
 }
 /* the picture a drawing is shrunk to: its box sets the sprite's place, its colours the palette */
 static const unsigned char *fitpic(int src) { return src == FROM_UP && S.has_up ? S.upfit : S.orig; }
+/* Outline auto decided here: the box fitpic gives for an upright drawing has no black in it, so the upright picture
+   itself is asked (the same rule, shrink.c orig_outlined) */
+static void outline_for(ShrinkOpt *o, int src) {
+    if (o->outline != O_AUTO) return;
+    o->outline = (src == FROM_UP && S.has_up ? orig_outlined(S.up, 32, 32) : orig_outlined(S.orig, 16, 16)) ? O_BLACK4 : O_NONE;
+}
 static void reshape_one(int item, Shot *s, const ShrinkOpt *o, LONG gen) {
     static unsigned char out[128 * 128 * 4]; int W, H;
     if (!s->drw) {
@@ -615,8 +673,8 @@ static void reshape_one(int item, Shot *s, const ShrinkOpt *o, LONG gen) {
         if (!(s->drw = stbi_load(p, &s->dw, &s->dh, &n, 3))) { vlog(VLOG_WARN, "shrink", "no drawing %s", p); s->gen = gen; return; }
     }
     shrink_size(o, 16, 16, &W, &H);
-    if (shrink(s->drw, s->dw, s->dh, fitpic(s->src), 16, 16, o, out)) set_res(s, out, W, H, gen);
-    else s->gen = gen;
+    { ShrinkOpt oo = *o; outline_for(&oo, s->src);
+      if (shrink(s->drw, s->dw, s->dh, fitpic(s->src), 16, 16, &oo, out)) set_res(s, out, W, H, gen); else s->gen = gen; }
 }
 static DWORD WINAPI rs_worker(LPVOID arg) {
     (void)arg;
@@ -669,10 +727,41 @@ static void read_kept(int item) {
 }
 /* the description for what the models are given: desc-upright.txt for the upright picture, desc.txt for the others */
 static void desc_path(int item, int from, char *p, int n) { itemdir(item, p, n); strcat(p, from == FROM_UP ? "\\desc-upright.txt" : "\\desc.txt"); }
+/* a description made to fit the upright picture: the lying words swapped for standing ones (the models follow the
+   words over the picture, so "lying diagonally" draws the sword diagonal again), else a sentence saying it stands */
+static void swap_all(char *s, size_t n, const char *from, const char *to) {
+    char *q = s; size_t lf = strlen(from), lt = strlen(to);
+    while ((q = strstr(q, from))) {
+        if (strlen(s) - lf + lt + 1 > n) return;
+        memmove(q + lt, q + lf, strlen(q + lf) + 1); memcpy(q, to, lt); q += lt;
+    }
+}
+static void upright_words(const char *in, char *out, size_t n) {
+    static const char *SW[][2] = {
+        { "lying diagonally", "standing straight upright" }, { "lies diagonally", "stands straight upright" },
+        { "at the upper left", "at the top" }, { "at the lower right", "at the bottom" },
+        { "at the upper right", "at the top" }, { "at the lower left", "at the bottom" },
+        { "picture's length", "picture's height" } };
+    size_t i;
+    snprintf(out, n, "%s", in);
+    if (!strstr(out, "diagonal")) {
+        size_t l = strlen(out); while (l && (out[l - 1] == ' ' || out[l - 1] == '\n' || out[l - 1] == '\r')) out[--l] = 0;
+        snprintf(out + l, n - l, "%sIt stands straight upright.", !l ? "" : strchr(".!?", out[l - 1]) ? " " : ". ");
+        return;
+    }
+    for (i = 0; i < sizeof SW / sizeof SW[0]; i++) swap_all(out, n, SW[i][0], SW[i][1]);
+}
 static void load_desc_text(int item) {
     char p[MAX_PATH], *t;
     desc_path(item, S.from, p, sizeof p);
-    if (!(t = read_all(p, NULL)) && S.from == FROM_UP) { desc_path(item, FROM_TOOL, p, sizeof p); t = read_all(p, NULL); }
+    if (!(t = read_all(p, NULL)) && S.from == FROM_UP) {
+        /* no upright description yet: the other one made upright (saved as desc-upright.txt when a round starts) */
+        char *o = NULL; desc_path(item, FROM_TOOL, p, sizeof p);
+        if ((o = read_all(p, NULL)) || S.desc[item]) {
+            const char *src = o ? o : S.desc[item]; size_t n = strlen(src) + 200; t = xmalloc(n); upright_words(src, t, n); free(o);
+            status("%03d: no upright description yet: made one from the other (check it before drawing).", item);
+        }
+    }
     if (t) { wrap(t, S.descbuf, sizeof S.descbuf, 34); free(t); }
     else if (S.desc[item]) wrap(S.desc[item], S.descbuf, sizeof S.descbuf, 34);
     else S.descbuf[0] = 0;
@@ -682,17 +771,71 @@ static void save_from(int item) {
     char p[MAX_PATH]; itemdir(item, p, sizeof p); mkdirs(p); strcat(p, "\\from.txt");
     write_all(p, FROM_NAMES[S.from], strlen(FROM_NAMES[S.from]));
 }
-/* the upright picture (the first upright = folder with NNN.png at 32 x 32), and its box at 16 x 16 filled with the
-   original's colours: the shrink takes only a box and a colour set from the picture it fits to */
-static void load_upright(int item) {
+/* the upright picture made here: Auto (only when the original lies tilted; the tilt measured), turned 45 right or
+   left, or Off; Classic (blade centre between two pixel columns) or Centred; the grip as it is or one pixel slimmer */
+enum { UPM_AUTO, UPM_RIGHT, UPM_LEFT, UPM_OFF };
+static const char *UPM_WORDS[] = { "auto", "right", "left", "off" };
+static void up_settings(int item, int save) {
+    char p[MAX_PATH], *t; static const char *SL[] = { "off", "sword", "shaft" };
+    itemdir(item, p, sizeof p);
+    if (save) mkdirs(p);
+    strcat(p, "\\upright.txt");
+    if (save) {
+        char s[96];
+        snprintf(s, sizeof s, "mode=%s style=%s slim=%s\n", UPM_WORDS[S.up_mode], S.up_style ? "centred" : "classic", SL[S.up_slim]);
+        write_all(p, s, strlen(s)); return;
+    }
+    S.up_mode = UPM_AUTO; S.up_style = 0; S.up_slim = UP_SLIM_OFF;
+    if ((t = read_all(p, NULL))) {
+        char *w; int i;
+        for (w = strtok(t, " \r\n"); w; w = strtok(NULL, " \r\n")) {
+            if (!strncmp(w, "mode=", 5)) for (i = 0; i < 4; i++) if (!strcmp(w + 5, UPM_WORDS[i])) S.up_mode = i;
+            if (!strncmp(w, "style=", 6)) S.up_style = !strcmp(w + 6, "centred");
+            if (!strncmp(w, "slim=", 5)) for (i = 0; i < 3; i++) if (!strcmp(w + 5, SL[i])) S.up_slim = i;
+        }
+        free(t);
+    }
+}
+/* made from the original with the item's settings into S.up (and NNN\upright.png); 0 = none (with the reason) */
+static int up_make(int item) {
+    UprightOpt o; char p[MAX_PATH]; double t, el; int tl, b0, b1, b2, b3;
+    if (S.up_mode == UPM_OFF) { snprintf(S.up_note, sizeof S.up_note, "(turned off)"); return 0; }
+    if (!bbox_a(S.orig, 16, 16, 1, &b0, &b1, &b2, &b3)) { snprintf(S.up_note, sizeof S.up_note, "(no original)"); return 0; }
+    upright_defaults(&o); o.centred = S.up_style; o.slim = S.up_slim;
+    if (S.up_mode == UPM_AUTO) {
+        if (!upright_measure(S.orig, 16, 16, &t, &el, &tl) || !tl) { snprintf(S.up_note, sizeof S.up_note, "(not tilted)"); return 0; }
+    } else { o.auto_turn = 0; o.turn = S.up_mode == UPM_RIGHT ? 45 : -45; }
+    if (!upright_make(S.orig, 16, 16, &o, S.up, &S.up_turn, NULL)) { snprintf(S.up_note, sizeof S.up_note, "(could not make it)"); return 0; }
+    itemdir(item, p, sizeof p); mkdirs(p); strcat(p, "\\upright.png");
+    if (!stbi_write_png(p, 32, 32, 4, S.up, 32 * 4)) vlog(VLOG_WARN, "upright", "could not write %s", p);
+    vlog(VLOG_INFO, "upright", "%03d stood upright: turned %.1f degrees, %s%s", item, S.up_turn, S.up_style ? "centred" : "classic", S.up_slim ? ", grip slimmed" : "");
+    return 1;
+}
+/* the upright picture: the first upright = folder with NNN.png at 32 x 32 (hand-made, always wins), else NNN\upright.png
+   made here before (kept, so a hand touch-up there stays until Remake), else made now. Then its box at 16 x 16 filled
+   with the original's colours: the shrink takes only a box and a colour set from the picture it fits to */
+static void load_upright(int item, int remake) {
     char p[MAX_PATH]; int i, w, h, x0, y0, x1, y1, x, y, nc = 0, k = 0; unsigned char *d, cols[256][3];
-    S.has_up = 0; memset(S.upfit, 0, sizeof S.upfit);
+    S.has_up = S.up_hand = 0; S.up_turn = 0; S.up_note[0] = 0; memset(S.upfit, 0, sizeof S.upfit);
     for (i = 0; i < N_UPRIGHT && !S.has_up; i++) {
         snprintf(p, sizeof p, "%s\\%03d.png", P_UPRIGHT[i], item);
         if (!exists(p) || !(d = load_rgba(p, &w, &h))) continue;
-        if (w == 32 && h == 32) { memcpy(S.up, d, sizeof S.up); S.has_up = 1; }
+        if (w == 32 && h == 32) { memcpy(S.up, d, sizeof S.up); S.has_up = S.up_hand = 1; }
         else vlog(VLOG_WARN, "pick", "%s is %d x %d, not 32 x 32: not used", p, w, h);
         stbi_image_free(d);
+    }
+    if (!S.has_up) {
+        up_settings(item, 0);
+        itemdir(item, p, sizeof p); strcat(p, "\\upright.png");
+        if (!remake && S.up_mode != UPM_OFF && exists(p) && (d = load_rgba(p, &w, &h))) {
+            if (w == 32 && h == 32) {
+                double t, el; int tl;
+                memcpy(S.up, d, sizeof S.up); S.has_up = 1;
+                if (S.up_mode == UPM_AUTO) { upright_measure(S.orig, 16, 16, &t, &el, &tl); S.up_turn = -t; } else S.up_turn = S.up_mode == UPM_RIGHT ? 45 : -45;
+            }
+            stbi_image_free(d);
+        }
+        if (!S.has_up) S.has_up = up_make(item);
     }
     if (!S.has_up || !bbox_a(S.up, 32, 32, 127, &x0, &y0, &x1, &y1)) { S.has_up = 0; return; }
     for (i = 0; i < 256 && nc < 256; i++) if (S.orig[i * 4 + 3] >= 128) { cols[nc][0] = S.orig[i * 4]; cols[nc][1] = S.orig[i * 4 + 1]; cols[nc][2] = S.orig[i * 4 + 2]; nc++; }
@@ -702,36 +845,127 @@ static void load_upright(int item) {
         o[0] = cols[k % nc][0]; o[1] = cols[k % nc][1]; o[2] = cols[k % nc][2]; o[3] = 255; k++;
     }
 }
-/* an item: its pictures, description, and the rounds made before (rounds.txt: "ROUND MODEL SEED [upright]") */
+/* ---------------------------------------------------------------- shrink presets: one click (or F1-F8) each.
+   A preset is "key=value ..." over the standard settings; the size, fit and colours stay as they are. Built-in ones first,
+   then the user's own from work\presets.txt ("NAME|key=value ...", a later line of the same name wins) */
+static const char *const PRESET_B[][2] = {
+    { "Standard", "" }, { "Clean patches", "regions=1 dist=1" }, { "Sword", "regions=1 dist=1 notch=1 blocks=1" },
+    { "Round thing", "regions=1 dist=1 orphans=1 jaggies=1" }, { "No outline", "outline=0 edge=1" }, { "Outline auto", "outline=4" },
+};
+/* kept when a preset is taken: the size and fit, and the colours chosen over the pictures (Original's / Model's) */
+static int size_key(const char *k) { return !strcmp(k, "size") || !strcmp(k, "cw") || !strcmp(k, "ch") || !strcmp(k, "fit") || !strcmp(k, "margin") || !strcmp(k, "colours") || !strcmp(k, "ncol"); }
+static void opt_parse(ShrinkOpt *o, const char *line) {      /* "key=value ..." onto o */
+    const char *q = line; char k[40]; int v, n;
+    while (*q) { while (*q == ' ' || *q == '\t') q++; if (!*q) break;
+        if (sscanf(q, "%39[^= ]=%d%n", k, &v, &n) == 2) { shrink_set(o, k, v); q += n; } else while (*q && *q != ' ') q++; }
+}
+static void opt_line(const ShrinkOpt *o, int with_size, char *b, int n) {   /* the keys that differ from the standard */
+    ShrinkOpt d; int i, a, c, l = 0; shrink_defaults(&d); b[0] = 0;
+    for (i = 0; SHRINK_KEYS[i]; i++) {
+        if (!with_size && size_key(SHRINK_KEYS[i])) continue;
+        shrink_get(o, SHRINK_KEYS[i], &a); shrink_get(&d, SHRINK_KEYS[i], &c);
+        if (a != c && l < n - 40) l += snprintf(b + l, (size_t)(n - l), "%s%s=%d", l ? " " : "", SHRINK_KEYS[i], a);
+    }
+}
+static void preset_apply_to(ShrinkOpt *o, int p) {
+    ShrinkOpt d; int i, v; shrink_defaults(&d);
+    for (i = 0; SHRINK_KEYS[i]; i++) if (size_key(SHRINK_KEYS[i])) { shrink_get(o, SHRINK_KEYS[i], &v); shrink_set(&d, SHRINK_KEYS[i], v); }
+    if (p >= 0 && p < S.np) opt_parse(&d, S.pset[p]);
+    *o = d;
+}
+static int preset_now(void) {    /* the preset the settings are now, or -1 */
+    int p; for (p = 0; p < S.np; p++) { ShrinkOpt o = S.opt; preset_apply_to(&o, p); if (!memcmp(&o, &S.opt, sizeof o)) return p; }
+    return -1;
+}
+static void load_presets(void) {
+    char p[MAX_PATH], *t, *l; int i;
+    S.np = 0;
+    for (i = 0; i < (int)(sizeof PRESET_B / sizeof PRESET_B[0]); i++) { snprintf(S.pname[S.np], 32, "%s", PRESET_B[i][0]); snprintf(S.pset[S.np], 400, "%s", PRESET_B[i][1]); S.np++; }
+    S.nbuiltin = S.np;
+    snprintf(p, sizeof p, "%s\\presets.txt", WORK);
+    if (!(t = read_all(p, NULL))) return;
+    for (l = strtok(t, "\r\n"); l; l = strtok(NULL, "\r\n")) {
+        char *bar = strchr(l, '|'); int k;
+        if (!bar || bar == l) continue; *bar = 0;
+        for (k = 0; k < S.np && strcmp(S.pname[k], l); k++) ;
+        if (k == S.np) { if (S.np >= 16) continue; S.np++; }
+        snprintf(S.pname[k], 32, "%s", l); snprintf(S.pset[k], 400, "%s", bar + 1);
+    }
+    free(t);
+}
+static void save_preset(const char *name) {
+    char p[MAX_PATH], l[500], s[400];
+    if (!name[0] || strchr(name, '|')) { status("Give the preset a name first (no | in it)."); return; }
+    opt_line(&S.opt, 0, s, sizeof s);
+    snprintf(p, sizeof p, "%s\\presets.txt", WORK); snprintf(l, sizeof l, "%s|%s", name, s); append_line(p, l);
+    load_presets(); status("Preset \"%s\" saved: one click in the bar over the pictures.", name);
+}
+/* the item's own shrink settings: NNN\shrink.txt (all keys that differ from the standard, the size too) */
+static void item_opt_path(int item, char *p, int n) { itemdir(item, p, n); strcat(p, "\\shrink.txt"); }
+static void item_opt_save(int item) {
+    char p[MAX_PATH], s[600]; itemdir(item, p, sizeof p); mkdirs(p); item_opt_path(item, p, sizeof p);
+    opt_line(&S.opt, 1, s, sizeof s); write_all(p, s, strlen(s));
+}
+static void item_opt_leave(void) {          /* before another item is shown */
+    if (!S.opt_loaded) return;
+    if (S.own_opt) item_opt_save(S.item); else S.gopt = S.opt;
+}
+static void item_opt_arrive(int item) {
+    char p[MAX_PATH], *t;
+    if (!S.opt_loaded) { S.gopt = S.opt; S.opt_loaded = 1; }
+    item_opt_path(item, p, sizeof p);
+    if ((t = read_all(p, NULL))) { shrink_defaults(&S.opt); opt_parse(&S.opt, t); free(t); S.own_opt = 1; }
+    else { S.opt = S.gopt; S.own_opt = 0; }
+}
+static void item_opt_toggle(void) {         /* "These settings for this item only" */
+    char p[MAX_PATH], q[MAX_PATH];
+    if (!S.own_opt) { S.own_opt = 1; item_opt_save(S.item); status("%03d keeps these settings of its own; the other items keep theirs.", S.item); return; }
+    S.own_opt = 0; item_opt_path(S.item, p, sizeof p); snprintf(q, sizeof q, "%s", p); strcpy(q + strlen(q) - 4, "-off.txt");
+    MoveFileExA(p, q, MOVEFILE_REPLACE_EXISTING);          /* kept as shrink-off.txt, not deleted */
+    S.opt = S.gopt; status("%03d uses the common settings again (its own are kept in shrink-off.txt).", S.item);
+}
+
+/* an item: its pictures, description, and the rounds made before (rounds.txt: "ROUND MODEL SEED [upright]"; the
+   pictures thrown out are in rejected.txt, "MODEL SEED", and not shown) */
 static void choose(int pos) {
     char p[MAX_PATH], *t; int item, w, h;
     unsigned char *d;
     if (S.busy) return;
     if (pos < 0) pos = S.nlist - 1;
     if (pos >= S.nlist) pos = 0;
+    item_opt_leave();
     S.pos = pos; item = S.item = S.list[pos];
+    item_opt_arrive(item);
+    S.cmp_for = -1;
     free_rounds();
     if (S.bm_orig) DeleteObject(S.bm_orig); if (S.bm_tool) DeleteObject(S.bm_tool); if (S.bm_up) DeleteObject(S.bm_up); if (S.pv_up) DeleteObject(S.pv_up); if (S.pv_orig) DeleteObject(S.pv_orig);
     S.bm_orig = S.bm_tool = S.bm_up = S.pv_up = S.pv_orig = NULL;
+    if (S.bm_mini) DeleteObject(S.bm_mini); S.bm_mini = NULL;
     memset(S.orig, 0, sizeof S.orig);
     snprintf(p, sizeof p, "%s\\%03d.png", P_SPRITES, item);
-    if ((d = load_rgba(p, &w, &h))) { if (w == 16 && h == 16) { memcpy(S.orig, d, sizeof S.orig); S.bm_orig = mkbmp(S.orig, 16, 16, 6, 0); S.pv_orig = mkbmp(S.orig, 16, 16, 12, 0); } stbi_image_free(d); }
+    if ((d = load_rgba(p, &w, &h))) { if (w == 16 && h == 16) { memcpy(S.orig, d, sizeof S.orig); S.bm_orig = mkbmp(S.orig, 16, 16, 6, 0); S.pv_orig = mkbmp(S.orig, 16, 16, 12, 0); S.bm_mini = mkbmp(S.orig, 16, 16, 2, 0); } stbi_image_free(d); }
     snprintf(p, sizeof p, "%s\\%03d.png", P_ENLARGED, item);
     if ((d = load_rgba(p, &w, &h))) { if (w == 32 && h == 32) { memcpy(S.tool, d, sizeof S.tool); S.bm_tool = mkbmp(S.tool, 32, 32, 3, 0); } stbi_image_free(d); }
-    load_upright(item);
+    load_upright(item, 0);
     if (S.has_up) { S.bm_up = mkbmp(S.up, 32, 32, 3, 0); S.pv_up = mkbmp(S.up, 32, 32, 6, 0); }
     /* what the models are given: from.txt, else the upright picture when there is one, else our tool's */
     S.from = S.has_up ? FROM_UP : FROM_TOOL;
     itemdir(item, p, sizeof p); strcat(p, "\\from.txt");
     if ((t = read_all(p, NULL))) { int f; for (f = 0; f < 3; f++) if (!strncmp(t, FROM_NAMES[f], strlen(FROM_NAMES[f]))) S.from = f; free(t); }
     if (S.from == FROM_UP && !S.has_up) S.from = FROM_TOOL;
+    if (S.from == FROM_TOOL && !S.bm_tool) S.from = S.has_up ? FROM_UP : FROM_ORIG;   /* no tool picture: never point at an empty slot */
     load_desc_text(item);
+    {   char *rj = NULL, *rf; itemdir(item, p, sizeof p); strcat(p, "\\rejected.txt");
+    if ((rf = read_all(p, NULL))) { size_t n = strlen(rf); rj = xmalloc(n + 3); rj[0] = '\n'; memcpy(rj + 1, rf, n); rj[n + 1] = '\n'; rj[n + 2] = 0; free(rf);
+                                  for (rf = rj; *rf; rf++) if (*rf == '\r') *rf = '\n'; }
     itemdir(item, p, sizeof p); strcat(p, "\\rounds.txt");
     if ((t = read_all(p, NULL))) {
         char *l;
         for (l = strtok(t, "\r\n"); l; l = strtok(NULL, "\r\n")) {
-            int rd, mi; char m[24], src[16] = ""; unsigned seed; Shot s; char sp[MAX_PATH];
+            int rd, mi; char m[24], src[16] = "", key[48]; unsigned seed; Shot s; char sp[MAX_PATH];
             if (sscanf(l, "%d %23s %u %15s", &rd, m, &seed, src) < 3 || rd < 0 || rd >= MAXR) continue;
+            snprintf(key, sizeof key, "\n%s %u\n", m, seed);
+            if (rj && strstr(rj, key)) continue;        /* thrown out */
             if ((mi = find_model(m)) < 0) { vlog(VLOG_WARN, "pick", "%03d: a picture of model \"%s\", which is not in models.txt: not shown", item, m); continue; }
             memset(&s, 0, sizeof s); s.model = mi; s.seed = seed; s.src = !strcmp(src, "upright") ? FROM_UP : FROM_TOOL;
             shotpath(item, &s, 1, sp, sizeof sp);
@@ -745,6 +979,7 @@ static void choose(int pos) {
         }
         free(t);
     }
+    free(rj); }
     S.cur = S.nr ? S.nr - 1 : 0;
     read_kept(item);
     kick_reshape();
@@ -798,7 +1033,12 @@ wait:
 static unsigned char *make_input(int item) {
     char p[MAX_PATH]; size_t len; char *raw = NULL; int w, h, x0, y0, x1, y1, cw, ch, nw, nh, ox, oy, x, y;
     unsigned char *pic; Buf png = { 0 }; double f;
-    if (S.from == FROM_UP && S.has_up) {
+    if (S.from == FROM_UP && S.has_up && !S.up_hand) {
+        /* made here: the same turn drawn large and clean from the 16 x 16 original (not the 32 x 32 in 22 x blocks) */
+        unsigned char *b = upright_big(S.orig, 16, 16, S.up_turn, 716, &w, &h);
+        if (b) { len = 8 + (size_t)w * h * 4; raw = xmalloc(len); memcpy(raw, &w, 4); memcpy(raw + 4, &h, 4); memcpy(raw + 8, b, (size_t)w * h * 4); free(b); }
+        snprintf(p, sizeof p, "the upright picture of %03d", item);
+    } else if (S.from == FROM_UP && S.has_up) {
         len = 8 + 32 * 32 * 4; raw = xmalloc(len); w = h = 32; memcpy(raw, &w, 4); memcpy(raw + 4, &h, 4); memcpy(raw + 8, S.up, 32 * 32 * 4);
         snprintf(p, sizeof p, "the upright picture of %03d", item);
     } else if (S.from == FROM_TOOL) {
@@ -973,7 +1213,7 @@ static void sd_log(enum sd_log_level_t lv, const char *t, void *data) {
 }
 static void sd_progress(int step, int steps, float t, void *data) {
     (void)data; (void)t;
-    if (SDX_DRAWING && steps > 0) { EnterCriticalSection(&S.cs); snprintf(S.sdstep, sizeof S.sdstep, " - step %d of %d", step, steps); LeaveCriticalSection(&S.cs); if (S.wnd) PostMessageA(S.wnd, WM_APP, 0, 0); }
+    if (SDX_DRAWING && steps > 0) { InterlockedExchange(&S.sd_step, step); InterlockedExchange(&S.sd_steps, steps); EnterCriticalSection(&S.cs); snprintf(S.sdstep, sizeof S.sdstep, " - step %d of %d", step, steps); LeaveCriticalSection(&S.cs); if (S.wnd) PostMessageA(S.wnd, WM_APP, 0, 0); }
 }
 /* "files:DIR/NAME" or "files:DIR\NAME" = that file in the models folder (voxup.ini model_files) */
 static void sd_value(const char *v, char *o, size_t n) {
@@ -1066,45 +1306,49 @@ static DWORD WINAPI worker(LPVOID arg) {
     (void)arg;
     unwrap(S.descbuf, desc, sizeof desc);
     for (i = 0; i < S.nm; i++) unwrap(S.m[i].prompt, tm[i], sizeof tm[i]);     /* the prompts as they were at Draw */
-    {   /* ComfyUI only when a shot needs it; the item's picture once for the built-in engine */
-        int need_comfy = 0, need_sd = 0; unsigned char *pic = NULL;
-        for (i = 0; i < R->n; i++) { if (use_sd(R->s[i].model)) need_sd = 1; else need_comfy = 1; }
-        if (need_comfy && (!comfy_ready() || !upload_input(item))) {
-            for (i = 0; i < R->n; i++) if (R->s[i].st == ST_WAIT && !use_sd(R->s[i].model)) R->s[i].st = S.stop ? ST_STOP : ST_FAIL;
-            need_comfy = 0;
-        }
-        if (need_sd && !(pic = make_input(item))) {
-            for (i = 0; i < R->n; i++) if (R->s[i].st == ST_WAIT) R->s[i].st = ST_FAIL;
-            goto out;
-        }
+    {   /* ComfyUI made ready when a shot first needs it; the item's picture made once for the built-in engine. The
+           round is gone through until no shot waits: one thrown out (right-click) while drawing is drawn again too */
+        int comfy_ok = -1, last_model = -1; unsigned char *pic = NULL, pic_fail = 0, freed = 0;
+        for (;;) {
+            Shot *s = NULL; int sd; DWORD t1;
+            for (i = 0; i < R->n; i++) if (R->s[i].st == ST_WAIT) { s = &R->s[i]; break; }
+            if (!s) break;
+            if (S.stop) { for (i = 0; i < R->n; i++) if (R->s[i].st == ST_WAIT) R->s[i].st = ST_STOP; break; }
+            sd = use_sd(s->model);
+            if (!sd && comfy_ok < 0) comfy_ok = comfy_ready() && upload_input(item);
+            if (!sd && !comfy_ok) { s->st = S.stop ? ST_STOP : ST_FAIL; snprintf(s->err, sizeof s->err, "ComfyUI did not start (see the log)"); continue; }
+            if (sd && !pic && !pic_fail && !(pic = make_input(item))) pic_fail = 1;
+            if (sd && pic_fail) { s->st = ST_FAIL; snprintf(s->err, sizeof s->err, "no picture to give the model"); continue; }
 #if SD_BUILT
-        /* the graphics card's memory for whichever draws: ComfyUI (ours, still running) asked to let go of its models,
-           or the built-in engine's model unloaded */
-        if (need_sd && S.comfy && WaitForSingleObject(S.comfy, 0) == WAIT_TIMEOUT && comfy_alive())
-            http(L"POST", "/free", "{\"unload_models\":true,\"free_memory\":true}", 41, L"Content-Type: application/json", NULL, 30000);
+            /* the graphics card's memory for whichever draws: ComfyUI (ours, still running) asked to let go of its
+               models, or the built-in engine's model unloaded */
+            if (sd && !freed && S.comfy && WaitForSingleObject(S.comfy, 0) == WAIT_TIMEOUT && comfy_alive())
+                http(L"POST", "/free", "{\"unload_models\":true,\"free_memory\":true}", 41, L"Content-Type: application/json", NULL, 30000);
+            if (sd) freed = 1;
 #endif
-        for (i = 0; i < R->n; i++) {
-            Shot *s = &R->s[i]; int sd = use_sd(s->model);
-            if (S.stop) { if (s->st == ST_WAIT) s->st = ST_STOP; continue; }
-            if (s->st != ST_WAIT) continue;
+            InterlockedExchange(&S.sd_step, 0); InterlockedExchange(&S.sd_steps, 0); S.draw_t0 = t1 = GetTickCount();
             s->st = ST_DRAW;
-            status("Drawing %d of %d: %s seed %u%s%s", i + 1, R->n, S.m[s->model].name, s->seed, sd ? " (built-in)" : "",
-                   i == 0 || (i > 0 && R->s[i - 1].model != s->model) ? " (loading the model first)" : "");
+            status("Drawing %d of %d: %s seed %u%s%s", (int)(s - R->s) + 1, R->n, S.m[s->model].name, s->seed, sd ? " (built-in)" : "",
+                   s->model != last_model ? " (loading the model first)" : "");
 #if SD_BUILT
             if (sd) draw_one_sd(item, rd, s, desc, tm[s->model], pic);
             else { sd_unload(); draw_one(item, rd, s, desc, tm[s->model]); }
 #else
             draw_one(item, rd, s, desc, tm[s->model]);
 #endif
-            if (s->st == ST_DONE) done++;
+            if (s->st == ST_DONE) {       /* how long a picture takes: each picture's progress bar while it draws */
+                DWORD dt = GetTickCount() - t1; done++;
+                if (s->model == last_model) S.avg_ms[s->model] = S.avg_ms[s->model] ? (S.avg_ms[s->model] * 3 + dt) / 4 : dt;
+            }
+            last_model = s->model;
             PostMessageA(S.wnd, WM_APP, 0, 0);
         }
         free(pic);
     }
-out:
-    if (!S.stop) status("Round %d done: %d of %d drawn in %lu s. Click one, then Keep, or press New seeds for more.",
-           rd + 1, done, R->n, (GetTickCount() - t0) / 1000);
-    else status("Stopped: %d drawn. Click one you like, or press New seeds.", done);
+    {   int have = 0; for (i = 0; i < R->n; i++) have += R->s[i].st == ST_DONE;      /* the whole round, earlier ones too */
+        if (!S.stop) status("Round %d done: %d of %d there (%d drawn now, %lu s). Double-click one to keep it, or Space for new seeds.",
+               rd + 1, have, R->n, done, (GetTickCount() - t0) / 1000);
+        else status("Stopped: %d drawn. Double-click one you like, or Space for new seeds.", done); }
     free(tm);
     InterlockedExchange(&S.busy, 0);
     PostMessageA(S.wnd, WM_APP, 0, 0);
@@ -1161,10 +1405,11 @@ static void keep(void) {
         unwrap(S.descbuf, d, sizeof d);
         snprintf(line, sizeof line, "%s  %03d %s  %s seed %u  round %d  %dx%d  shrink: %s  EXPORT %s  | %s", stamp, S.item, S.name[S.item], S.m[s->model].name, s->seed, S.cur + 1, rw, rh, how, dst, d);
         snprintf(bk, sizeof bk, "%s\\keep.txt", WORK); append_line(bk, line);
-        return;
+        S.nkeeps++; return;
     }
     for (i = 0; i < N_GAME; i++) {
         snprintf(dst, sizeof dst, "%s\\%03d.png", GAMEDIRS[i], S.item);
+        S.undo_had[i] = exists(dst) != 0;
         if (exists(dst)) {
             snprintf(bk, sizeof bk, "%s\\backup\\%s\\%s", WORK, stamp, GAMETAG[i]); mkdirs(bk);
             snprintf(bk + strlen(bk), sizeof bk - strlen(bk), "\\%03d.png", S.item);
@@ -1179,8 +1424,223 @@ static void keep(void) {
     itemdir(S.item, dst, sizeof dst); strcat(dst, "\\kept.txt");
     snprintf(line, sizeof line, "%s seed %u (round %d, %dx%d, %s, %s)", S.m[s->model].name, s->seed, S.cur + 1, rw, rh, how, stamp); write_all(dst, line, strlen(line));
     S.kept[S.item] = 1; read_kept(S.item);
+    S.undo_item = S.item; snprintf(S.undo_stamp, sizeof S.undo_stamp, "%s", stamp);
+    S.nkeeps++;
     if (ok) status("Kept %s seed %u as %03d's new picture (%s%s).", S.m[s->model].name, s->seed, S.item, GAMEDIRS[0], N_GAME > 1 ? " and the other game folders" : "");
     else status("Keep failed for part of it: %s", vlog_last());
+}
+/* the last keep taken back: each game folder gets its picture from before (backup\STAMP); where there was none, the
+   kept picture is moved to backup\STAMP-undone (nothing is deleted). kept.txt becomes kept-undone.txt */
+static void undo_keep(void) {
+    char dst[MAX_PATH], bk[MAX_PATH], un[MAX_PATH], line[300]; int i, ok = 1, item = S.undo_item;
+    if (item < 0) return;
+    for (i = 0; i < N_GAME; i++) {
+        snprintf(dst, sizeof dst, "%s\\%03d.png", GAMEDIRS[i], item);
+        snprintf(un, sizeof un, "%s\\backup\\%s-undone\\%s", WORK, S.undo_stamp, GAMETAG[i]); mkdirs(un);
+        snprintf(un + strlen(un), sizeof un - strlen(un), "\\%03d.png", item);
+        if (exists(dst) && !CopyFileA(dst, un, FALSE)) { vlog(VLOG_ERR, "undo", "could not save %s to %s: %s", dst, un, vlog_errno()); ok = 0; continue; }
+        if (S.undo_had[i]) {
+            snprintf(bk, sizeof bk, "%s\\backup\\%s\\%s\\%03d.png", WORK, S.undo_stamp, GAMETAG[i], item);
+            if (!CopyFileA(bk, dst, FALSE)) { vlog(VLOG_ERR, "undo", "could not put %s back: %s", bk, vlog_errno()); ok = 0; }
+        } else if (exists(dst) && !MoveFileExA(dst, un, MOVEFILE_REPLACE_EXISTING)) { vlog(VLOG_ERR, "undo", "could not move %s to %s: %s", dst, un, vlog_errno()); ok = 0; }
+    }
+    itemdir(item, dst, sizeof dst); strcat(dst, "\\kept.txt");
+    itemdir(item, un, sizeof un); strcat(un, "\\kept-undone.txt");
+    if (exists(dst)) MoveFileExA(dst, un, MOVEFILE_REPLACE_EXISTING);
+    snprintf(line, sizeof line, "%s  %03d UNDONE (the pictures from before put back; the kept one in backup\\%s-undone)", S.undo_stamp, item, S.undo_stamp);
+    snprintf(dst, sizeof dst, "%s\\keep.txt", WORK); append_line(dst, line);
+    S.kept[item] = 0; if (item == S.item) read_kept(item);
+    S.undo_item = -1;
+    if (ok) status("%03d: the keep is undone; the picture from before is back in the game folders.", item);
+    else status("Undo failed for part of it: %s", vlog_last());
+}
+
+/* ---------------------------------------------------------------- the item filter (the Find box): words, all must fit:
+   a number (the item's number starts with it), kept, new (not kept), tilted, queued, or a part of the name */
+static int item_tilted(int k) {
+    if (S.tilt[k] < 0) {
+        char p[MAX_PATH]; int w, h; unsigned char *d; double t, el; int tl = 0;
+        snprintf(p, sizeof p, "%s\\%03d.png", P_SPRITES, k);
+        if ((d = load_rgba(p, &w, &h))) { if (w == 16 && h == 16) upright_measure(d, 16, 16, &t, &el, &tl); stbi_image_free(d); }
+        S.tilt[k] = (signed char)(tl != 0);
+    }
+    return S.tilt[k];
+}
+static int queued(int k) { int i; for (i = 0; i < S.nq; i++) if (S.queue[i] == k) return 1; return 0; }
+static int item_fits(int k) {
+    char f[48], *w, num[8], num3[8], nm[48]; int i;
+    if (!S.find[0]) return 1;
+    snprintf(f, sizeof f, "%s", S.find); for (i = 0; f[i]; i++) f[i] = (char)tolower((unsigned char)f[i]);
+    snprintf(num, sizeof num, "%d", k); snprintf(num3, sizeof num3, "%03d", k);
+    snprintf(nm, sizeof nm, "%s", S.name[k]); for (i = 0; nm[i]; i++) nm[i] = (char)tolower((unsigned char)nm[i]);
+    for (w = strtok(f, " ,"); w; w = strtok(NULL, " ,")) {
+        if (isdigit((unsigned char)w[0])) { if (strncmp(num, w, strlen(w)) && strncmp(num3, w, strlen(w))) return 0; }
+        else if (!strcmp(w, "kept")) { if (!S.kept[k]) return 0; }
+        else if (!strcmp(w, "new")) { if (S.kept[k]) return 0; }
+        else if (!strcmp(w, "tilted")) { if (!item_tilted(k)) return 0; }
+        else if (!strcmp(w, "queued")) { if (!queued(k)) return 0; }
+        else if (!strstr(nm, w)) return 0;
+    }
+    return 1;
+}
+static int count_fits(void) { int i, n = 0; for (i = 0; i < S.nlist; i++) n += item_fits(S.list[i]); return n; }
+static void step_item(int dir) {        /* the next / earlier item the filter lets through */
+    int i, p = S.pos;
+    for (i = 0; i < S.nlist; i++) { p = (p + dir + S.nlist) % S.nlist; if (item_fits(S.list[p])) { choose(p); return; } }
+    status("No item fits \"%s\".", S.find);
+}
+static void first_fit(void) { int i; for (i = 0; i < S.nlist; i++) if (item_fits(S.list[i])) { if (i != S.pos) choose(i); return; } status("No item fits \"%s\".", S.find); }
+
+/* ---------------------------------------------------------------- the queue: a round drawn for each item in turn
+   (overnight), with the model counts and settings as they are; work\queue.txt */
+static void queue_save(void) {
+    char p[MAX_PATH]; Buf b = { 0 }; int i; char l[16];
+    for (i = 0; i < S.nq; i++) { snprintf(l, sizeof l, "%d\r\n", S.queue[i]); buf_str(&b, l); }
+    snprintf(p, sizeof p, "%s\\queue.txt", WORK); write_all(p, b.p ? (char *)b.p : "", b.n); free(b.p);
+}
+static void queue_load(void) {
+    char p[MAX_PATH], *t, *l; snprintf(p, sizeof p, "%s\\queue.txt", WORK); S.nq = 0;
+    if (!(t = read_all(p, NULL))) return;
+    for (l = strtok(t, "\r\n"); l; l = strtok(NULL, "\r\n")) { int k = atoi(l); if (k >= 0 && k < 512 && S.nq < 512 && !queued(k)) S.queue[S.nq++] = k; }
+    free(t);
+}
+static void queue_toggle(int k) {
+    int i;
+    for (i = 0; i < S.nq; i++) if (S.queue[i] == k) { memmove(S.queue + i, S.queue + i + 1, sizeof(int) * (size_t)(S.nq - i - 1)); S.nq--; queue_save(); status("%03d taken off the queue (%d left).", k, S.nq); return; }
+    if (S.nq < 512) { S.queue[S.nq++] = k; queue_save(); status("%03d is on the queue (%d): Run queue draws a round of each.", k, S.nq); }
+}
+static void queue_add_fits(void) { int i, n = 0; for (i = 0; i < S.nlist; i++) { int k = S.list[i]; if (item_fits(k) && !queued(k) && S.nq < 512) { S.queue[S.nq++] = k; n++; } } queue_save(); status("%d item(s) put on the queue (%d on it).", n, S.nq); }
+static void queue_tick(void) {          /* the main loop, when nothing draws: the next queued item's round */
+    if (!S.qrun || S.busy || S.rs_busy) return;
+    while (S.nq) {
+        int k = S.queue[0], i, nr0;
+        memmove(S.queue, S.queue + 1, sizeof(int) * (size_t)(S.nq - 1)); S.nq--; queue_save();
+        for (i = 0; i < S.nlist && S.list[i] != k; i++) ;
+        if (i == S.nlist) continue;
+        choose(i); nr0 = S.nr; start_round();
+        if (S.nr > nr0) return;          /* drawing */
+        vlog(VLOG_WARN, "queue", "%03d skipped: no round started (no description?)", k);
+    }
+    S.qrun = 0; status("The queue is done.");
+}
+
+/* ---------------------------------------------------------------- one picture thrown out (right-click, Delete) and
+   drawn again in its place with a new seed; rejected.txt keeps it out of the round when the item is loaded again
+   (its files stay) */
+static void redraw_one(int k) {
+    Round *R; Shot *s; char p[MAX_PATH], l[80]; unsigned sd; HANDLE th;
+    if (!S.nr || S.cur >= S.nr) return;
+    R = &S.r[S.cur]; if (k < 0 || k >= R->n) return;
+    s = &R->s[k];
+    if (s->st == ST_DRAW || s->st == ST_WAIT) return;
+    if (S.busy && S.drawing_round != S.cur) { status("Another round is drawing: throw this one out when it is done."); return; }
+    if (!S.m[s->model].ready) { status("%s is not on this computer any more.", S.m[s->model].name); return; }
+    stop_reshape();
+    if (s->st == ST_DONE) { itemdir(S.item, p, sizeof p); strcat(p, "\\rejected.txt"); snprintf(l, sizeof l, "%s %u", S.m[s->model].id, s->seed); append_line(p, l); }
+    EnterCriticalSection(&S.cs);
+    if (s->bm) DeleteObject(s->bm); s->bm = NULL; free(s->res); s->res = NULL; if (s->drw) stbi_image_free(s->drw); s->drw = NULL;
+    s->gen = 0; s->bmgen = 0; s->err[0] = 0;
+    do sd = rnd(); while (seed_used(sd));
+    s->seed = sd; s->src = S.from == FROM_UP && S.has_up ? FROM_UP : S.from; s->st = ST_WAIT;
+    LeaveCriticalSection(&S.cs);
+    if (S.sel == k) S.sel = -1;
+    S.pv_for = -1; S.cmp_for = -1;
+    kick_reshape();
+    status("Picture %d thrown out: a new one is drawn in its place.", k + 1);
+    if (S.busy) return;                  /* the drawing round's worker comes to it */
+    S.drawing_round = S.cur; S.stop = 0; InterlockedExchange(&S.busy, 1);
+    th = CreateThread(NULL, 0, worker, NULL, 0, NULL);
+    if (th) CloseHandle(th); else { InterlockedExchange(&S.busy, 0); status("Could not start the drawing thread: %s", vlog_errno()); }
+}
+
+/* ---------------------------------------------------------------- Compare: the chosen drawing through every preset,
+   with a score each: shape (how much of the sprite and the original's box at this size cover each other), colour
+   (the mean distance of each pixel from the original's nearest colour), lone (pixels of a colour no neighbour has) */
+/* ref: the shape to match (the original 16 x 16, or the upright picture 32 x 32 for a drawing made from it) */
+static void score_sprite(const unsigned char *spr, int W, int H, const unsigned char *ref, int rs, char *o, int n) {
+    int x, y, both = 0, any = 0, lone = 0, cnt = 0, i, np = 0; double cerr = 0; unsigned char pal[256][3];
+    for (i = 0; i < 256; i++) if (S.orig[i * 4 + 3] >= 128 && np < 256) { pal[np][0] = S.orig[i * 4]; pal[np][1] = S.orig[i * 4 + 1]; pal[np][2] = S.orig[i * 4 + 2]; np++; }
+    for (y = 0; y < H; y++) for (x = 0; x < W; x++) {
+        const unsigned char *q = spr + ((size_t)y * W + x) * 4; int a = q[3] >= 128, b = ref[((y * rs / H) * rs + x * rs / W) * 4 + 3] >= 128;
+        both += a && b; any += a || b;
+        if (!a) continue;
+        cnt++;
+        if (np) { int best = 1 << 30; for (i = 0; i < np; i++) { int dr = q[0] - pal[i][0], dg = q[1] - pal[i][1], db = q[2] - pal[i][2], d = dr * dr + dg * dg + db * db; if (d < best) best = d; } cerr += sqrt((double)best); }
+        { int same = 0, dx[4] = { 1, -1, 0, 0 }, dy[4] = { 0, 0, 1, -1 }, j;
+          for (j = 0; j < 4; j++) { int u = x + dx[j], v = y + dy[j]; const unsigned char *r; if (u < 0 || v < 0 || u >= W || v >= H) continue; r = spr + ((size_t)v * W + u) * 4; if (r[3] >= 128 && r[0] == q[0] && r[1] == q[1] && r[2] == q[2]) same = 1; }
+          lone += !same; }
+    }
+    snprintf(o, (size_t)n, "fit %d%%  col %d  lone %d", any ? both * 100 / any : 0, cnt ? (int)(cerr / cnt + 0.5) : 0, lone);
+}
+static void compare_make(Shot *s) {
+    char p[MAX_PATH]; int dw, dh, nn, i, W, H, z; unsigned char *d; static unsigned char out[128 * 128 * 4];
+    LONG key = (LONG)(S.cur * 100 + S.sel);
+    if (S.cmp_for == key && S.cmp_gen == S.np * 1000 + (S.opt.size * 300 + S.opt.cw * 3 + S.opt.ch)) return;
+    for (i = 0; i < 17; i++) { if (S.cmp_bm[i]) DeleteObject(S.cmp_bm[i]); S.cmp_bm[i] = NULL; S.cmp_score[i][0] = 0; }
+    S.cmp_for = key; S.cmp_gen = S.np * 1000 + (S.opt.size * 300 + S.opt.cw * 3 + S.opt.ch);
+    shotpath(S.item, s, 0, p, sizeof p);
+    if (!(d = stbi_load(p, &dw, &dh, &nn, 3))) { vlog(VLOG_WARN, "compare", "no drawing %s", p); return; }
+    for (i = 0; i < S.np && i < 16; i++) {
+        ShrinkOpt o = S.opt; preset_apply_to(&o, i); shrink_size(&o, 16, 16, &W, &H);
+        outline_for(&o, s->src);
+        if (!shrink(d, dw, dh, fitpic(s->src), 16, 16, &o, out)) continue;
+        z = 96 / (W > H ? W : H); if (z < 1) z = 1;
+        S.cmp_bm[i] = mkbmp(out, W, H, z, 0); S.cmp_w[i] = W * z; S.cmp_h[i] = H * z;
+        if (s->src == FROM_UP && S.has_up) score_sprite(out, W, H, S.up, 32, S.cmp_score[i], sizeof S.cmp_score[i]);
+        else score_sprite(out, W, H, S.orig, 16, S.cmp_score[i], sizeof S.cmp_score[i]);
+    }
+    stbi_image_free(d);
+}
+
+/* ---------------------------------------------------------------- keys (none while a text box is typed in) */
+static void after_keep(void) {          /* "After Keep: the next new item" */
+    int i, p = S.pos;
+    if (!S.auto_next || S.busy) return;
+    for (i = 0; i < S.nlist; i++) { p = (p + 1) % S.nlist; if (!S.kept[S.list[p]] && item_fits(S.list[p])) { choose(p); return; } }
+}
+static void keep_next(void) { int n = S.nkeeps; keep(); if (S.nkeeps != n) after_keep(); }
+static void move_sel(int dx, int dy) {
+    Round *R; int k;
+    if (!S.nr) return;
+    R = &S.r[S.cur]; if (!R->n) return;
+    k = S.sel < 0 ? 0 : S.sel + dx + dy * 5;
+    if (k < 0) k = 0;
+    if (k >= R->n) k = R->n - 1;
+    S.sel = k; if (S.tab == 1) S.tab = 0;
+}
+static void set_tab(int t) { S.tab = t; }
+static int hotkey(int vk) {
+    int ctrl = GetKeyState(VK_CONTROL) < 0, busy = S.busy != 0;
+    switch (vk) {
+    case VK_PRIOR: if (!busy) step_item(-1); return 1;
+    case VK_NEXT: if (!busy) step_item(1); return 1;
+    case VK_LEFT: move_sel(-1, 0); return 1;
+    case VK_RIGHT: move_sel(1, 0); return 1;
+    case VK_UP: move_sel(0, -1); return 1;
+    case VK_DOWN: move_sel(0, 1); return 1;
+    case VK_SPACE: if (!busy) start_round(); return 1;
+    case VK_RETURN: case 'K': if (!ctrl) keep_next(); return 1;
+    case VK_DELETE: case 'X': redraw_one(S.sel); return 1;
+    case 'Z': if (ctrl && !busy && S.undo_item >= 0) undo_keep(); return ctrl;
+    case VK_ESCAPE: if (busy && !S.stop) { InterlockedExchange(&S.stop, 1); status("Stopping after this picture...");
+#if SD_BUILT
+                        if (SDX_DRAWING && SDX) sd_cancel_generation(SDX, SD_CANCEL_ALL);
+#endif
+                    } S.qrun = 0; return 1;
+    case VK_HOME: case VK_OEM_COMMA: if (S.cur > 0) { S.cur--; S.sel = -1; kick_reshape(); } return 1;
+    case VK_END: case VK_OEM_PERIOD: if (S.cur < S.nr - 1) { S.cur++; S.sel = -1; kick_reshape(); } return 1;
+    case 'F': if (ctrl) { S.find_focus = 1; return 1; } return 0;
+    case VK_OEM_2: S.find_focus = 1; return 1;                     /* the / key */
+    case 'Q': queue_toggle(S.item); return 1;
+    case 'R': if (!busy && S.nq) { S.qrun = 1; status("Running the queue: a round for each of %d item(s).", S.nq); } return 1;
+    case '1': set_tab(0); return 1;
+    case '2': set_tab(1); return 1;
+    case '3': set_tab(2); return 1;
+    case 'O': S.opt.colours = C_ORIGINAL; return 1;
+    case 'M': S.opt.colours = C_OWN; return 1;
+    }
+    if (vk >= VK_F1 && vk <= VK_F12 && vk - VK_F1 < S.np) { preset_apply_to(&S.opt, vk - VK_F1); status("Preset: %s", S.pname[vk - VK_F1]); return 1; }
+    return 0;
 }
 
 /* ---------------------------------------------------------------- getting a model: its missing files from their links.
@@ -1325,10 +1785,21 @@ static void settings_panel(struct nk_context *ctx) {
     static const char *const SMOOTH[] = { "None", "Median 3 x 3", "Bilateral (keeps edges)" };
     static const char *const COL[] = { "The original's", "Original's + shades", "The model's own", "Model's own, as drawn", "N found (k-means)", "N found (median cut)" };
     static const char *const DIST[] = { "RGB", "Lab (as seen)", "Weighted RGB" }, *const DITH[] = { "None", "Floyd-Steinberg", "Atkinson", "Ordered (Bayer 4x4)" };
-    static const char *const LINE[] = { "Take it off", "Leave it" }, *const OUTL[] = { "None", "Black", "Black, corners too", "Selective (darker shade)" };
+    static const char *const LINE[] = { "Take it off", "Leave it" }, *const OUTL[] = { "None", "Black", "Black, corners too", "Selective (darker shade)", "Auto (as the original)" };
     static const char *const EDGE[] = { "Rough (as shrunk)", "Smooth (whole pixels)" };
     ShrinkOpt *o = &S.opt; int line = o->peel > 0 ? 0 : 1;
     char d[600];
+    {   /* this item's own settings; the settings saved as a preset (a button over the pictures) */
+        int own = S.own_opt; nk_flags ef;
+        s_check(ctx, "These settings for this item only", &own);
+        if (own != S.own_opt) item_opt_toggle();
+        nk_layout_row_begin(ctx, NK_STATIC, 24, 2);
+        nk_layout_row_push(ctx, 178); ef = nk_edit_string_zero_terminated(ctx, NK_EDIT_FIELD | NK_EDIT_SIG_ENTER, S.newpreset, sizeof S.newpreset, nk_filter_default);
+        if (ef & NK_EDIT_ACTIVE) S.find_typing = 1;
+        nk_layout_row_push(ctx, 116);
+        if (button(ctx, "Save as preset", 0, S.newpreset[0] != 0) || ((ef & NK_EDIT_COMMITED) && S.newpreset[0])) { save_preset(S.newpreset); S.newpreset[0] = 0; nk_edit_unfocus(ctx); }
+        nk_layout_row_end(ctx);
+    }
     s_head(ctx, "Size");
     s_combo(ctx, "Sprite size", SIZE, 3, &o->size);
     if (o->size == SZ_CUSTOM) { s_int(ctx, "Width", &o->cw, 1, 128, 1); s_int(ctx, "Height", &o->ch, 1, 128, 1);
@@ -1339,6 +1810,8 @@ static void settings_panel(struct nk_context *ctx) {
     s_int(ctx, "Colour distance", &o->bg_dist, 10, 250, 5);
     s_check(ctx, "Plain magenta is background", &o->magenta);
     s_int(ctx, "Cover kept (of 255)", &o->alpha_cut, 1, 254, 4);
+    s_check(ctx, "Flood from the border", &o->flood);
+    if (o->flood) s_note(ctx, "Pink fringe and the model's shadow go too; holes inside stay.");
     s_head(ctx, "Before shrinking");
     s_int(ctx, "Contrast", &o->contrast, -100, 100, 5);
     s_int(ctx, "Brightness", &o->brightness, -100, 100, 5);
@@ -1352,6 +1825,10 @@ static void settings_panel(struct nk_context *ctx) {
         s_note(ctx, "SAID, Arjun et al. 2025: sharper along edges, texture kept."); }
     if (o->method == M_SUPERPIXEL) { s_int(ctx, "Compactness", &o->sp_m, 1, 100, 1); s_int(ctx, "Passes", &o->sp_iter, 1, 30, 1); s_note(ctx, "Superpixels, Gerstner et al. 2012 (pixelated image abstraction)."); }
     if (o->method == M_MAJORITY) s_note(ctx, "Each pixel the commonest colour of its area.");
+    if (o->method == M_TWOSTEP) s_note(ctx, "Lanczos to 4 times the size, then the commonest colour twice: 4x to 2x to 1x.");
+    s_check(ctx, "In linear light", &o->linear);
+    s_check(ctx, "Shape decided on its own", &o->silhouette);
+    if (o->silhouette) s_note(ctx, "Half-covered pixels kept, and thin lines (covered more than both neighbours).");
     s_int(ctx, "Fill pinholes", &o->pinholes, 0, 3, 1);
     s_head(ctx, "Colours");
     s_combo(ctx, "Colours", COL, 6, &o->colours);
@@ -1360,6 +1837,7 @@ static void settings_panel(struct nk_context *ctx) {
         s_combo(ctx, "Nearest by", DIST, 3, &o->dist);
         s_combo(ctx, "Dithering", DITH, 4, &o->dither);
         if (o->dither) s_int(ctx, "Dither %", &o->dither_amt, 0, 100, 5);
+        else s_check(ctx, "One colour per patch (vote)", &o->regions);
     }
     if (o->colours == C_OWN) s_int(ctx, "Pink snapped at", &o->pink, 0, 100, 5);
     s_int(ctx, "Black below", &o->black, 0, 128, 4);
@@ -1370,7 +1848,9 @@ static void settings_panel(struct nk_context *ctx) {
     s_check(ctx, "Lone pixels: neighbours. colour", &o->orphans);
     s_check(ctx, "Doubled corners in lines off", &o->jaggies);
     s_head(ctx, "Outline");
-    s_combo(ctx, "Outline", OUTL, 4, &o->outline);
+    s_combo(ctx, "Outline", OUTL, 5, &o->outline);
+    s_check(ctx, "Black bites into it filled", &o->notch);
+    s_check(ctx, "2 x 2 black blocks broken", &o->blocks);
     if (o->outline != O_NONE) s_int(ctx, "Thickness", &o->othick, 1, 4, 1);
     else s_combo(ctx, "Edge", EDGE, 2, &o->edge);
     nk_layout_row_dynamic(ctx, 8, 1); nk_spacing(ctx, 1);
@@ -1379,47 +1859,147 @@ static void settings_panel(struct nk_context *ctx) {
     shrink_describe(o, d, sizeof d);
     nk_layout_row_dynamic(ctx, 60, 1); nk_label_colored_wrap(ctx, d, DIM);
 }
+/* what the models are given (a click on a before picture): the description so far saved for the one before, the new
+   one's loaded */
+static void set_from(int nf) {
+    char d[4096];
+    if (nf == FROM_UP && !S.has_up) return;
+    unwrap(S.descbuf, d, sizeof d);
+    if (d[0]) { char p[MAX_PATH]; itemdir(S.item, p, sizeof p); mkdirs(p); desc_path(S.item, S.from, p, sizeof p); write_all(p, d, strlen(d)); }
+    S.from = nf; save_from(S.item); load_desc_text(S.item);
+    if (nf == FROM_UP) status("%03d: the models get the upright picture; describe it standing upright.", S.item);
+    else status("%03d: the models get %s picture.", S.item, nf == FROM_TOOL ? "our tool's" : "the original");
+}
+/* the Compare tab: the original 16 and the upright 32 beside the chosen drawing through each preset; a click on one
+   takes that preset for the whole round */
+static void compare_panel(struct nk_context *ctx, Shot *s) {
+    int i, now = preset_now();
+    nk_layout_row_static(ctx, 18, 96, 2); nk_label_colored(ctx, "Original 16", NK_TEXT_LEFT, DIM); nk_label_colored(ctx, "Upright 32", NK_TEXT_LEFT, DIM);
+    nk_layout_row_static(ctx, 96, 96, 2);
+    if (S.bm_orig) nk_image(ctx, nkimg(S.bm_orig, 96, 96)); else nk_spacing(ctx, 1);
+    if (S.bm_up) nk_image(ctx, nkimg(S.bm_up, 96, 96)); else nk_label_colored(ctx, "(none)", NK_TEXT_LEFT, DIM);
+    if (!s || s->st != ST_DONE) { nk_layout_row_dynamic(ctx, 40, 1); nk_label_colored_wrap(ctx, "Click a picture (or an arrow key): its drawing is shown here through every preset.", DIM); return; }
+    compare_make(s);
+    nk_layout_row_dynamic(ctx, 20, 1);
+    { char t[96]; snprintf(t, sizeof t, "%s seed %u, by preset (click one to use it):", S.m[s->model].name, s->seed); nk_label_colored(ctx, t, NK_TEXT_LEFT, GOLD); }
+    for (i = 0; i < S.np; i += 2) {
+        int j; struct nk_command_buffer *cv; const struct nk_user_font *f = ctx->style.font;
+        nk_layout_row_static(ctx, 96 + 34, 156, 2);
+        for (j = i; j < i + 2; j++) {
+            struct nk_rect b; enum nk_widget_layout_states ws;
+            if (j >= S.np) { nk_spacing(ctx, 1); continue; }
+            ws = nk_widget(&b, ctx); if (ws == NK_WIDGET_INVALID) continue;
+            cv = nk_window_get_canvas(ctx);
+            nk_fill_rect(cv, nk_rect(b.x + 30, b.y, 96, 96), 0, nk_rgb(64, 68, 77));
+            if (S.cmp_bm[j]) { struct nk_image im = nkimg(S.cmp_bm[j], S.cmp_w[j], S.cmp_h[j]);
+                nk_draw_image(cv, nk_rect(b.x + 30 + (96 - S.cmp_w[j]) / 2, b.y + (96 - S.cmp_h[j]) / 2, (float)S.cmp_w[j], (float)S.cmp_h[j]), &im, nk_rgb(255, 255, 255)); }
+            nk_draw_text(cv, nk_rect(b.x, b.y + 97, 156, 16), S.pname[j], (int)strlen(S.pname[j]), f, nk_rgb(45, 45, 45), j == now ? TEAL2 : GOLD);
+            nk_draw_text(cv, nk_rect(b.x, b.y + 113, 156, 16), S.cmp_score[j], (int)strlen(S.cmp_score[j]), f, nk_rgb(45, 45, 45), DIM);
+            if (j == now) nk_stroke_rect(cv, nk_rect(b.x + 28, b.y - 2, 100, 100), 0, 2, TEAL2);
+            if (nk_input_is_mouse_hovering_rect(&ctx->input, b)) nk_tooltip(ctx, S.cmp_score[j]);
+            if (ws == NK_WIDGET_VALID && nk_input_is_mouse_click_down_in_rect(&ctx->input, NK_BUTTON_LEFT, b, nk_true)) { preset_apply_to(&S.opt, j); status("Preset: %s", S.pname[j]); }
+        }
+    }
+    nk_layout_row_dynamic(ctx, 50, 1);
+    nk_label_colored_wrap(ctx, "fit: how much the sprite and the original's (or the upright picture's) shape cover each other. col: how far its colours are from the original's (0 = all its own). lone: single pixels of a colour.", DIM);
+}
 static int gui_frame(struct nk_context *ctx, int W, int H) {
     char lab[700]; int i, busy = S.busy != 0;
     if (!nk_begin(ctx, "voxup", nk_rect(0, 0, (float)W, (float)H), NK_WINDOW_NO_SCROLLBAR)) { nk_end(ctx); return 0; }
+    if (S.unfocus) { nk_edit_unfocus(ctx); S.unfocus = 0; }
     nk_layout_row_begin(ctx, NK_STATIC, (float)(H - 16), 3);
     /* left: the item */
     nk_layout_row_push(ctx, 330);
     if (nk_group_begin(ctx, "item", NK_WINDOW_BORDER)) {
-        nk_layout_row_dynamic(ctx, 20, 1); nk_label_colored(ctx, "Item", NK_TEXT_LEFT, GOLD);
+        {   /* Find: the list, < > and PgUp/PgDn keep to the items that fit; Enter goes to the first */
+            struct nk_rect bb; nk_flags ef; char old[48]; snprintf(old, sizeof old, "%s", S.find);
+            nk_layout_row_begin(ctx, NK_STATIC, 24, 3);
+            nk_layout_row_push(ctx, 40); nk_label_colored(ctx, "Item", NK_TEXT_LEFT, GOLD);
+            nk_layout_row_push(ctx, 170); bb = nk_widget_bounds(ctx);
+            if (S.find_focus) { nk_edit_focus(ctx, NK_EDIT_FIELD | NK_EDIT_SIG_ENTER); S.find_focus = 0; }
+            ef = nk_edit_string_zero_terminated(ctx, NK_EDIT_FIELD | NK_EDIT_SIG_ENTER, S.find, sizeof S.find, nk_filter_default);
+            S.find_typing = (ef & NK_EDIT_ACTIVE) != 0;
+            if (nk_input_is_mouse_hovering_rect(&ctx->input, bb)) nk_tooltip(ctx, "Find (Ctrl+F or /): a number, part of the name, kept, new, tilted or queued; Enter goes to the first.");
+            if ((ef & NK_EDIT_COMMITED) && !busy) { first_fit(); nk_edit_unfocus(ctx); }
+            nk_layout_row_push(ctx, 90);
+            if (S.find[0]) { snprintf(lab, sizeof lab, "%d fit", count_fits()); nk_label_colored(ctx, lab, NK_TEXT_LEFT, DIM); }
+            else nk_label_colored(ctx, "(find)", NK_TEXT_LEFT, DIM);
+            nk_layout_row_end(ctx);
+        }
         nk_layout_row_begin(ctx, NK_STATIC, 28, 3);
-        nk_layout_row_push(ctx, 30); if (button(ctx, "<", 0, !busy)) choose(S.pos - 1);
+        nk_layout_row_push(ctx, 30); if (button(ctx, "<", 0, !busy)) step_item(-1);
         nk_layout_row_push(ctx, 220);
-        snprintf(lab, sizeof lab, "%03d %s%s", S.item, S.name[S.item], S.kept[S.item] ? "  (kept)" : "");
+        snprintf(lab, sizeof lab, "%03d %s%s%s", S.item, S.name[S.item], S.kept[S.item] ? "  (kept)" : "", queued(S.item) ? "  (queued)" : "");
         if (!busy && nk_combo_begin_label(ctx, lab, nk_vec2(300, 520))) {
             nk_layout_row_dynamic(ctx, 22, 1);
             for (i = 0; i < S.nlist; i++) {
-                int k = S.list[i]; char l[96]; snprintf(l, sizeof l, "%03d %s%s", k, S.name[k], S.kept[k] ? "  (kept)" : "");
+                int k = S.list[i]; char l[96];
+                if (!item_fits(k)) continue;
+                snprintf(l, sizeof l, "%03d %s%s%s", k, S.name[k], S.kept[k] ? "  (kept)" : "", queued(k) ? "  (queued)" : "");
                 if (nk_combo_item_label(ctx, l, NK_TEXT_LEFT)) choose(i);
             }
             nk_combo_end(ctx);
         } else if (busy) { nk_widget_disable_begin(ctx); nk_button_label(ctx, lab); nk_widget_disable_end(ctx); }
-        nk_layout_row_push(ctx, 30); if (button(ctx, ">", 0, !busy)) choose(S.pos + 1);
+        nk_layout_row_push(ctx, 30); if (button(ctx, ">", 0, !busy)) step_item(1);
         nk_layout_row_end(ctx);
-        /* the three before pictures: the original, our tool's enlarged one, the upright one (voxup.ini upright =) */
-        nk_layout_row_static(ctx, 18, 100, 3); nk_label_colored(ctx, "Original 16", NK_TEXT_LEFT, DIM); nk_label_colored(ctx, "Our tool 32", NK_TEXT_LEFT, DIM); nk_label_colored(ctx, "Upright 32", NK_TEXT_LEFT, DIM);
-        nk_layout_row_static(ctx, 96, 96, 3);
-        if (S.bm_orig) nk_image(ctx, nkimg(S.bm_orig, 96, 96)); else nk_label(ctx, "(none)", NK_TEXT_LEFT);
-        if (S.bm_tool) nk_image(ctx, nkimg(S.bm_tool, 96, 96)); else nk_label(ctx, "(none)", NK_TEXT_LEFT);
-        if (S.bm_up) nk_image(ctx, nkimg(S.bm_up, 96, 96)); else nk_label_colored(ctx, "(none)", NK_TEXT_LEFT, DIM);
-        {   /* what the models are given */
-            static const char *fl[] = { "Our tool's", "The upright one", "The original" }; int f = S.from, nf;
-            nk_layout_row_begin(ctx, NK_STATIC, 24, 2); nk_layout_row_push(ctx, 120); nk_label(ctx, "Draw from", NK_TEXT_LEFT);
-            nk_layout_row_push(ctx, 180);
-            if (busy) nk_widget_disable_begin(ctx);
-            nf = nk_combo(ctx, fl, 3, f, 22, nk_vec2(180, 100));
-            if (busy) nk_widget_disable_end(ctx);
+        {   /* the queue: this item on or off (Q), every item found, Run */
+            nk_layout_row_begin(ctx, NK_STATIC, 24, 3);
+            nk_layout_row_push(ctx, 96); if (button(ctx, queued(S.item) ? "Off queue" : "Queue it (Q)", 0, 1)) queue_toggle(S.item);
+            nk_layout_row_push(ctx, 96); if (button(ctx, "Queue found", 0, S.find[0] != 0)) queue_add_fits();
+            nk_layout_row_push(ctx, 104);
+            if (S.qrun) { snprintf(lab, sizeof lab, "Stop queue (%d)", S.nq); if (button(ctx, lab, 0, 1)) S.qrun = 0; }
+            else { snprintf(lab, sizeof lab, "Run queue (%d)", S.nq); if (button(ctx, lab, S.nq > 0, S.nq > 0 && !busy)) { S.qrun = 1; status("Running the queue: a round for each of %d item(s).", S.nq); } }
             nk_layout_row_end(ctx);
-            if (!busy && nf != f && (nf != FROM_UP || S.has_up)) {
-                char d[4096]; unwrap(S.descbuf, d, sizeof d);
-                if (d[0]) { char p[MAX_PATH]; itemdir(S.item, p, sizeof p); mkdirs(p); desc_path(S.item, S.from, p, sizeof p); write_all(p, d, strlen(d)); }
-                S.from = nf; save_from(S.item); load_desc_text(S.item);
-                status(nf == FROM_UP ? "%03d: the models get the upright picture; describe it standing upright." : "%03d: the models get %s picture.", S.item, nf == FROM_TOOL ? "our tool's" : "the original");
+        }
+        /* the three before pictures: the original, our tool's enlarged one, the upright one (voxup.ini upright =) */
+        /* the three before pictures (the original, our tool's enlarged one, the upright one): a click on one = the
+           models draw from it (framed) */
+        nk_layout_row_dynamic(ctx, 18, 1); nk_label_colored(ctx, "Draw from: click a picture (framed)", NK_TEXT_LEFT, GOLD);
+        nk_layout_row_static(ctx, 18, 100, 3); nk_label_colored(ctx, "Original 16", NK_TEXT_LEFT, DIM); nk_label_colored(ctx, "Our tool 32", NK_TEXT_LEFT, DIM); nk_label_colored(ctx, "Upright 32", NK_TEXT_LEFT, DIM);
+        nk_layout_row_static(ctx, 100, 100, 3);
+        {   static const int FR[3] = { FROM_ORIG, FROM_TOOL, FROM_UP }; HBITMAP bm[3]; int c, pick = -1;
+            bm[0] = S.bm_orig; bm[1] = S.bm_tool; bm[2] = S.bm_up;
+            for (c = 0; c < 3; c++) {
+                struct nk_rect b; enum nk_widget_layout_states ws = nk_widget(&b, ctx); struct nk_command_buffer *cv;
+                if (ws == NK_WIDGET_INVALID) continue;
+                cv = nk_window_get_canvas(ctx);
+                if (bm[c]) { struct nk_image im = nkimg(bm[c], 96, 96); nk_draw_image(cv, nk_rect(b.x + 2, b.y + 2, 96, 96), &im, nk_rgb(255, 255, 255)); }
+                else { const char *t = c == 2 && S.up_note[0] ? S.up_note : "(none)"; nk_draw_text(cv, nk_rect(b.x + 4, b.y + 40, 96, 18), t, (int)strlen(t), ctx->style.font, nk_rgb(45, 45, 45), DIM); }
+                if (S.from == FR[c]) nk_stroke_rect(cv, nk_rect(b.x, b.y, 100, 100), 0, 2, TEAL2);
+                if (ws == NK_WIDGET_VALID && bm[c] && nk_input_is_mouse_click_down_in_rect(&ctx->input, NK_BUTTON_LEFT, b, nk_true)) pick = FR[c];
+                if (nk_input_is_mouse_hovering_rect(&ctx->input, b)) nk_tooltip(ctx, S.from == FR[c] ? "The models draw from this one." : "Click: the models draw from this one.");
+            }
+            if (pick >= 0 && pick != S.from) { if (busy) status("Drawing: choose what it draws from when the round is done."); else set_from(pick); }
+        }
+        if (S.up_hand) { nk_layout_row_dynamic(ctx, 20, 1); nk_label_colored(ctx, "Upright: hand-made (your upright folder)", NK_TEXT_LEFT, DIM); }
+        else {   /* the upright picture made here: how, and Remake (a touch-up in NNN\upright.png stays until then) */
+            static const char *ml[] = { "Auto (if tilted)", "Turn right 45", "Turn left 45", "Off" }, *stl[] = { "Classic", "Centred" },
+                              *sll[] = { "Grip as it is", "Slim sword grip", "Slim shaft" };
+            int m = S.up_mode, st = S.up_style, sl = S.up_slim, remake = 0; struct nk_rect bb;
+            if (busy) nk_widget_disable_begin(ctx);
+            nk_layout_row_begin(ctx, NK_STATIC, 24, 3);
+            nk_layout_row_push(ctx, 60); bb = nk_widget_bounds(ctx); nk_label(ctx, "Upright", NK_TEXT_LEFT);
+            if (nk_input_is_mouse_hovering_rect(&ctx->input, bb)) nk_tooltip(ctx, "Stands a tilted item upright at 32 x 32 from the original (cleanEdge turn, no new colours). Auto: only when it lies tilted.");
+            nk_layout_row_push(ctx, 130); m = nk_combo(ctx, ml, 4, m, 22, nk_vec2(150, 120));
+            nk_layout_row_push(ctx, 110); st = nk_combo(ctx, stl, 2, st, 22, nk_vec2(110, 70));
+            nk_layout_row_end(ctx);
+            nk_layout_row_begin(ctx, NK_STATIC, 24, 3);
+            nk_layout_row_push(ctx, 60); nk_label(ctx, "", NK_TEXT_LEFT);
+            nk_layout_row_push(ctx, 130); sl = nk_combo(ctx, sll, 3, sl, 22, nk_vec2(150, 100));
+            nk_layout_row_push(ctx, 110); bb = nk_widget_bounds(ctx); remake = nk_button_label(ctx, "Remake");
+            if (nk_input_is_mouse_hovering_rect(&ctx->input, bb)) nk_tooltip(ctx, "Makes the upright picture again from the original (a touch-up made by hand in its upright.png goes).");
+            nk_layout_row_end(ctx);
+            if (busy) nk_widget_disable_end(ctx);
+            if (!busy && (m != S.up_mode || st != S.up_style || sl != S.up_slim || remake)) {
+                S.up_mode = m; S.up_style = st; S.up_slim = sl; up_settings(S.item, 1);
+                load_upright(S.item, 1);
+                if (S.bm_up) DeleteObject(S.bm_up); if (S.pv_up) DeleteObject(S.pv_up); S.bm_up = S.pv_up = NULL;
+                if (S.has_up) { S.bm_up = mkbmp(S.up, 32, 32, 3, 0); S.pv_up = mkbmp(S.up, 32, 32, 6, 0); }
+                if (S.from == FROM_UP && !S.has_up) { S.from = FROM_TOOL; save_from(S.item); load_desc_text(S.item); }
+                S.upitem = -1;                                  /* the models' picture made again */
+                InterlockedIncrement(&S.optgen); kick_reshape(); /* upright shots shrink into the new box */
+                if (S.has_up) status("%03d: upright picture made (turned %.0f degrees).", S.item, S.up_turn);
+                else status("%03d: no upright picture %s.", S.item, S.up_note);
             }
         }
         nk_layout_row_dynamic(ctx, 20, 1);
@@ -1441,8 +2021,11 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
             nk_layout_row_end(ctx);
         }
 #endif
+        {   int nget = 0; for (i = 0; i < S.nm; i++) nget += !S.m[i].ready;
+            S.nget = nget; }
         for (i = 0; i < S.nm; i++) {
             Model *M = &S.m[i]; struct nk_rect bb; int dl = S.dl_busy && S.dl_model == i;
+            if (!M->ready && !dl && !S.show_get) continue;      /* the ones still to get: folded (the row below) */
             nk_layout_row_begin(ctx, NK_STATIC, 24, 3);
             nk_layout_row_push(ctx, 128); bb = nk_widget_bounds(ctx);
             nk_label_colored(ctx, M->name, NK_TEXT_LEFT, !M->ready ? DIM : M->n ? TEAL2 : nk_rgb(215, 215, 220));
@@ -1456,22 +2039,15 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
             else if (button(ctx, "Only", 0, !busy)) { int j; for (j = 0; j < S.nm; j++) S.m[j].n = 0; M->n = 20; }
             nk_layout_row_end(ctx);
         }
+        if (S.nget) {
+            nk_layout_row_dynamic(ctx, 24, 1);
+            snprintf(lab, sizeof lab, S.show_get ? "Hide the models still to get" : "%d more models to get...", S.nget);
+            if (button(ctx, lab, 0, 1)) S.show_get = !S.show_get;
+        }
         EnterCriticalSection(&S.cs);
         if (S.dl_busy || S.dl_msg[0]) { nk_layout_row_dynamic(ctx, 36, 1); nk_label_colored_wrap(ctx, S.dl_msg, S.dl_busy ? GOLD : TEAL2); }
         LeaveCriticalSection(&S.cs);
         if (S.dl_busy) { nk_size d = (nk_size)(S.dl_done >> 20), t = (nk_size)(S.dl_total >> 20); nk_layout_row_dynamic(ctx, 14, 1); nk_progress(ctx, &d, t ? t : 1, 0); }
-        nk_layout_row_dynamic(ctx, 36, 1);
-        snprintf(lab, sizeof lab, S.nr ? "New %d seeds" : "Draw %d", round_size());
-        if (button(ctx, lab, 1, !busy && round_size() > 0 && round_size() <= MAXSHOT)) start_round();
-        nk_layout_row_dynamic(ctx, 28, 1);
-        if (button(ctx, S.stop && busy ? "Stopping..." : "Stop", 0, busy && !S.stop)) {
-            InterlockedExchange(&S.stop, 1); status("Stopping after this picture...");
-#if SD_BUILT
-            if (SDX_DRAWING && SDX) sd_cancel_generation(SDX, SD_CANCEL_ALL);     /* the built-in engine stops at once */
-#endif
-        }
-        nk_layout_row_dynamic(ctx, 60, 1);
-        EnterCriticalSection(&S.cs); snprintf(lab, sizeof lab, "%.400s%s", S.status, S.sdstep); LeaveCriticalSection(&S.cs); nk_label_colored_wrap(ctx, lab, GOLD);
         if (nk_tree_push(ctx, NK_TREE_TAB, "Prompts ({d} = what it is)", NK_MINIMIZED)) {
             if (S.nm) {
                 Model *M = &S.m[S.pmodel < S.nm ? S.pmodel : 0];
@@ -1495,7 +2071,22 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
     /* middle: the round's pictures */
     nk_layout_row_push(ctx, 5 * 140 + 40);
     if (nk_group_begin(ctx, "grid", NK_WINDOW_BORDER)) {
-        Round *R = S.nr ? &S.r[S.cur] : NULL; int r, c, kdone = 0;
+        Round *R = S.nr ? &S.r[S.cur] : NULL; int r, c, kdone = 0, dbl = -1, rclick = -1;
+        /* Draw and Stop over the pictures, the status line under them: always in sight */
+        nk_layout_row_begin(ctx, NK_STATIC, 32, 2);
+        nk_layout_row_push(ctx, 330);
+        snprintf(lab, sizeof lab, S.nr ? "New %d seeds  (Space)" : "Draw %d  (Space)", round_size());
+        if (button(ctx, lab, 1, !busy && round_size() > 0 && round_size() <= MAXSHOT)) start_round();
+        nk_layout_row_push(ctx, 150);
+        if (button(ctx, S.stop && busy ? "Stopping..." : "Stop  (Esc)", 0, busy && !S.stop)) {
+            InterlockedExchange(&S.stop, 1); status("Stopping after this picture..."); S.qrun = 0;
+#if SD_BUILT
+            if (SDX_DRAWING && SDX) sd_cancel_generation(SDX, SD_CANCEL_ALL);     /* the built-in engine stops at once */
+#endif
+        }
+        nk_layout_row_end(ctx);
+        nk_layout_row_dynamic(ctx, 36, 1);
+        EnterCriticalSection(&S.cs); snprintf(lab, sizeof lab, "%.400s%s", S.status, S.sdstep); LeaveCriticalSection(&S.cs); nk_label_colored_wrap(ctx, lab, GOLD);
         nk_layout_row_begin(ctx, NK_STATIC, 28, 6);
         nk_layout_row_push(ctx, 80); if (button(ctx, "< Back", 0, S.cur > 0)) { S.cur--; S.sel = -1; kick_reshape(); }
         nk_layout_row_push(ctx, 80); if (button(ctx, "Next >", 0, S.cur < S.nr - 1)) { S.cur++; S.sel = -1; kick_reshape(); }
@@ -1509,6 +2100,21 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
         nk_layout_row_push(ctx, 150); if (button(ctx, "Original's colours", S.opt.colours == C_ORIGINAL, 1)) S.opt.colours = C_ORIGINAL;
         nk_layout_row_push(ctx, 150); if (button(ctx, "Model's colours", S.opt.colours == C_OWN, 1)) S.opt.colours = C_OWN;
         nk_layout_row_end(ctx);
+        {   /* the presets: one click each (F1, F2, ...), the one in use lit */
+            int now = preset_now(), p, per = 7;
+            for (p = 0; p < S.np; p++) {
+                struct nk_rect bb; char t[48];
+                if (p % per == 0) { if (p) nk_layout_row_end(ctx); nk_layout_row_begin(ctx, NK_STATIC, 24, per + 1); nk_layout_row_push(ctx, 50); nk_label_colored(ctx, p ? "" : "Preset", NK_TEXT_LEFT, DIM); }
+                nk_layout_row_push(ctx, 92); bb = nk_widget_bounds(ctx);
+                snprintf(t, sizeof t, "%s", S.pname[p]);
+                if (button(ctx, t, p == now, 1)) { preset_apply_to(&S.opt, p); status("Preset: %s", S.pname[p]); }
+                if (nk_input_is_mouse_hovering_rect(&ctx->input, bb)) { char h[480]; snprintf(h, sizeof h, "F%d. %s", p + 1, S.pset[p][0] ? S.pset[p] : "the standard settings"); nk_tooltip(ctx, h); }
+            }
+            if (S.np) nk_layout_row_end(ctx);
+        }
+        nk_layout_row_dynamic(ctx, 18, 1);
+        nk_label_colored(ctx, "Click: look at it   Double-click / Enter: keep   Right-click / Del: draw that one again   Space / Ctrl+Enter: draw   Esc: stop", NK_TEXT_LEFT, DIM);
+        nk_label_colored(ctx, "Arrows: choose   PgUp/PgDn: item   Home/End: round   Ctrl+Z: undo keep   Ctrl+F: find   Q / R: queue / run it   1 2 3: panels   F1..: presets", NK_TEXT_LEFT, DIM);
         for (r = 0; R && r * 5 < R->n; r++) {
             nk_layout_row_static(ctx, 128 + 20, 128, 5);
             for (c = 0; c < 5; c++) {
@@ -1527,30 +2133,49 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
                     int z = 128 / (s->rw > s->rh ? s->rw : s->rh), iw, ih; struct nk_image im; if (z < 1) z = 1; iw = s->rw * z; ih = s->rh * z;
                     nk_fill_rect(cv, nk_rect(b.x, b.y, 128, 128), 0, nk_rgb(64, 68, 77));
                     im = nkimg(s->bm, iw, ih); nk_draw_image(cv, nk_rect(b.x + (128 - iw) / 2, b.y + (128 - ih) / 2, (float)iw, (float)ih), &im, nk_rgb(255, 255, 255));
+                    if (S.bm_mini) {    /* the original, small, in the corner: always there to compare with */
+                        nk_fill_rect(cv, nk_rect(b.x + 128 - 35, b.y + 1, 34, 34), 0, nk_rgb(30, 32, 38));
+                        im = nkimg(S.bm_mini, 32, 32); nk_draw_image(cv, nk_rect(b.x + 128 - 34, b.y + 2, 32, 32), &im, nk_rgb(255, 255, 255));
+                    }
                 }
                 else {
-                    const char *m = s->st == ST_WAIT ? "waiting" : s->st == ST_DRAW ? "drawing..." : s->st == ST_FAIL ? "failed" : "stopped";
+                    const char *m = s->st == ST_WAIT ? "waiting" : s->st == ST_DRAW ? "drawing..." : s->st == ST_FAIL ? "failed (right-click: again)" : "stopped (right-click: draw)";
                     nk_fill_rect(cv, nk_rect(b.x, b.y, 128, 128), 0, nk_rgb(40, 42, 50));
                     nk_draw_text(cv, nk_rect(b.x + 8, b.y + 54, 120, 20), m, (int)strlen(m), f, nk_rgb(40, 42, 50), s->st == ST_DRAW ? GOLD : DIM);
+                    if (s->st == ST_DRAW) {   /* its progress: the built-in engine's steps, else the time against the model's usual */
+                        LONG st = S.sd_step, sn = S.sd_steps; DWORD el = GetTickCount() - S.draw_t0, avg = S.avg_ms[s->model]; double fr = 0; char pt[48];
+                        if (sn > 0) { fr = (double)st / sn; snprintf(pt, sizeof pt, "step %ld of %ld", (long)st, (long)sn); }
+                        else if (avg) { fr = (double)el / avg; if (fr > 0.98) fr = 0.98; snprintf(pt, sizeof pt, "%lu s of about %lu", el / 1000, (avg + 500) / 1000); }
+                        else snprintf(pt, sizeof pt, "%lu s", el / 1000);
+                        nk_draw_text(cv, nk_rect(b.x + 8, b.y + 76, 120, 18), pt, (int)strlen(pt), f, nk_rgb(40, 42, 50), DIM);
+                        nk_fill_rect(cv, nk_rect(b.x + 8, b.y + 100, 112, 8), 0, nk_rgb(60, 64, 72));
+                        nk_fill_rect(cv, nk_rect(b.x + 8, b.y + 100, (float)(112 * fr), 8), 0, TEAL2);
+                    }
                 }
                 snprintf(t, sizeof t, "%s %u", S.m[s->model].name, s->seed);
                 { static const struct nk_color mc[] = { { 120, 210, 200, 255 }, { 150, 190, 230, 255 }, { 230, 200, 110, 255 }, { 150, 215, 140, 255 }, { 190, 170, 235, 255 }, { 220, 220, 225, 255 } };
                   nk_draw_text(cv, nk_rect(b.x, b.y + 130, 128, 18), t, (int)strlen(t), f, nk_rgb(45, 45, 45), mc[s->model % 6]); }
                 if (S.sel == k) nk_stroke_rect(cv, nk_rect(b.x - 3, b.y - 3, 134, 134), 0, 3, TEAL2);
-                if (ws == NK_WIDGET_VALID && s->st == ST_DONE && nk_input_mouse_clicked(&ctx->input, NK_BUTTON_LEFT, b)) S.sel = k;
+                if (ws == NK_WIDGET_VALID && s->st == ST_DONE && nk_input_mouse_clicked(&ctx->input, NK_BUTTON_LEFT, b)) { S.sel = k; if (S.tab == 1) S.tab = 0; }
+                if (ws == NK_WIDGET_VALID && s->st == ST_DONE && nk_input_is_mouse_click_down_in_rect(&ctx->input, NK_BUTTON_DOUBLE, b, nk_true)) dbl = k;
+                if (ws == NK_WIDGET_VALID && nk_input_is_mouse_click_down_in_rect(&ctx->input, NK_BUTTON_RIGHT, b, nk_true)) rclick = k;
                 if (s->st == ST_FAIL && nk_input_is_mouse_hovering_rect(&ctx->input, b)) nk_tooltip(ctx, s->err);
             }
         }
         nk_group_end(ctx);
+        if (rclick >= 0) redraw_one(rclick);
+        else if (dbl >= 0) { S.sel = dbl; keep_next(); }
     }
     /* right: the chosen one, and Keep */
     nk_layout_row_push(ctx, (float)(W - 330 - 5 * 140 - 40 - 40));
     if (nk_group_begin(ctx, "chosen", NK_WINDOW_BORDER)) {
         Shot *s = S.sel >= 0 && S.nr && S.sel < S.r[S.cur].n ? &S.r[S.cur].s[S.sel] : NULL;
-        nk_layout_row_dynamic(ctx, 28, 2);
-        if (button(ctx, "Chosen one", S.tab == 0, 1)) S.tab = 0;
-        if (button(ctx, "Shrink settings", S.tab == 1, 1)) S.tab = 1;
+        nk_layout_row_dynamic(ctx, 28, 3);
+        if (button(ctx, "Chosen (1)", S.tab == 0, 1)) S.tab = 0;
+        if (button(ctx, "Settings (2)", S.tab == 1, 1)) S.tab = 1;
+        if (button(ctx, "Compare (3)", S.tab == 2, 1)) S.tab = 2;
         if (S.tab == 1) settings_panel(ctx);
+        else if (S.tab == 2) compare_panel(ctx, s);
         else {
         nk_layout_row_dynamic(ctx, 20, 1);
         if (s && s->st == ST_DONE) {
@@ -1566,9 +2191,13 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
             nk_layout_row_dynamic(ctx, 20, 1); nk_label_colored(ctx, "The model's drawing", NK_TEXT_LEFT, DIM);
             nk_layout_row_static(ctx, 192, 192, 1); if (S.pv_draw) nk_image(ctx, nkimg(S.pv_draw, 192, 192));
             nk_layout_row_dynamic(ctx, 40, 1);
-            if (button(ctx, "Keep this one", 1, 1)) keep();
+            if (button(ctx, "Keep this one (Enter)", 1, 1)) keep_next();
+            if (S.undo_item >= 0) { nk_layout_row_dynamic(ctx, 28, 1); if (button(ctx, "Undo the last keep (Ctrl+Z)", 0, !busy)) undo_keep(); }
+            s_check(ctx, "After Keep: the next new item", &S.auto_next);
         } else {
-            nk_label_colored(ctx, "Click a picture to choose it.", NK_TEXT_LEFT, DIM);
+            nk_label_colored(ctx, "Click a picture to choose it (or the arrow keys).", NK_TEXT_LEFT, DIM);
+            if (S.undo_item >= 0) { nk_layout_row_dynamic(ctx, 28, 1); if (button(ctx, "Undo the last keep (Ctrl+Z)", 0, !busy)) undo_keep(); nk_layout_row_dynamic(ctx, 20, 1); }
+            s_check(ctx, "After Keep: the next new item", &S.auto_next); nk_layout_row_dynamic(ctx, 20, 1);
             nk_layout_row_dynamic(ctx, 20, 1); nk_label_colored(ctx, "The original", NK_TEXT_LEFT, DIM);
             nk_layout_row_static(ctx, 192, 192, 1); if (S.pv_orig) nk_image(ctx, nkimg(S.pv_orig, 192, 192));
         }
@@ -1576,14 +2205,21 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
         nk_group_end(ctx);
     }
     nk_layout_row_end(ctx);
+    {   /* a text box or a number being typed in: the keys go to it, not to the window's actions */
+        struct nk_window *w = ctx->current;
+        S.typing = S.find_typing || (w && (w->edit.active || w->property.active));
+    }
     nk_end(ctx);
     return 1;
 }
 
 static LRESULT CALLBACK wndproc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
-    if (m == WM_DESTROY) { PostQuitMessage(0); return 0; }
+    if (m == WM_DESTROY) { S.wp.length = sizeof S.wp; S.have_wp = GetWindowPlacement(w, &S.wp) != 0; PostQuitMessage(0); return 0; }
     if (m == WM_APP) return 0;
     if (m == WM_CLOSE && S.busy) { InterlockedExchange(&S.stop, 1); }
+    if (m == WM_KEYDOWN && wp == VK_RETURN && GetKeyState(VK_CONTROL) < 0) { if (!S.busy) start_round(); return 0; }   /* Ctrl+Enter: draw, even while typing */
+    if (m == WM_KEYDOWN && wp == VK_ESCAPE && S.typing) { S.unfocus = 1; return 0; }                 /* Esc: out of the text box */
+    if (m == WM_KEYDOWN && !S.typing && hotkey((int)wp)) return 0;
     if (nk_gdi_handle_event(w, m, wp, lp)) return 0;
     return DefWindowProcW(w, m, wp, lp);
 }
@@ -1603,7 +2239,11 @@ static void settings(int save) {
     if (save) {       /* item=NNN, then n.ID=N: how many pictures each model draws */
         Buf b = { 0 }; char l[80];
         snprintf(l, sizeof l, "item=%d\r\n", S.item); buf_str(&b, l);
-        for (i = 0; SHRINK_KEYS[i]; i++) { int v; shrink_get(&S.opt, SHRINK_KEYS[i], &v); snprintf(l, sizeof l, "shrink.%s=%d\r\n", SHRINK_KEYS[i], v); buf_str(&b, l); }
+        const ShrinkOpt *g = S.own_opt ? &S.gopt : &S.opt;      /* the common settings (an item's own are in its folder) */
+        if (S.own_opt) item_opt_save(S.item);
+        for (i = 0; SHRINK_KEYS[i]; i++) { int v; shrink_get(g, SHRINK_KEYS[i], &v); snprintf(l, sizeof l, "shrink.%s=%d\r\n", SHRINK_KEYS[i], v); buf_str(&b, l); }
+        snprintf(l, sizeof l, "auto_next=%d\r\ntab=%d\r\nshow_get=%d\r\n", S.auto_next, S.tab, S.show_get); buf_str(&b, l);
+        if (S.have_wp) { RECT r = S.wp.rcNormalPosition; snprintf(l, sizeof l, "window=%ld,%ld,%ld,%ld,%d\r\n", r.left, r.top, r.right, r.bottom, S.wp.showCmd == SW_SHOWMAXIMIZED); buf_str(&b, l); }
         for (m = 0; m < S.nm; m++) { snprintf(l, sizeof l, "n.%s=%d\r\n", S.m[m].id, S.m[m].n); buf_str(&b, l); }
         for (m = 0; m < S.nm; m++) if (S.m[m].sdimage == 2) { snprintf(l, sizeof l, "strength.%s=%d\r\n", S.m[m].id, S.m[m].strength); buf_str(&b, l); }
         for (m = 0; m < S.nm; m++) if (S.m[m].has_lora) { snprintf(l, sizeof l, "lora.%s=%d\r\n", S.m[m].id, S.m[m].lora_w); buf_str(&b, l); }
@@ -1625,6 +2265,13 @@ static void settings(int save) {
     }
     if (!any) for (m = 0; m < S.nm; m++) if (S.m[m].ready) { S.m[m].n = 10; if (++any == 2) break; }
     if ((q = strstr(t, "\nengine="))) S.engine = atoi(q + 8) == 1;
+    if ((q = strstr(t, "\nauto_next="))) S.auto_next = atoi(q + 11) == 1;
+    if ((q = strstr(t, "\ntab="))) S.tab = atoi(q + 5) >= 0 && atoi(q + 5) <= 2 ? atoi(q + 5) : 0;
+    if ((q = strstr(t, "\nshow_get="))) S.show_get = atoi(q + 10) == 1;
+    if ((q = strstr(t, "\nwindow="))) { long a, b2, c, d; int mx = 0;
+        if (sscanf(q + 8, "%ld,%ld,%ld,%ld,%d", &a, &b2, &c, &d, &mx) >= 4 && c - a >= 600 && d - b2 >= 400) {
+            memset(&S.wp, 0, sizeof S.wp); S.wp.length = sizeof S.wp; S.wp.rcNormalPosition.left = a; S.wp.rcNormalPosition.top = b2;
+            S.wp.rcNormalPosition.right = c; S.wp.rcNormalPosition.bottom = d; S.wp.showCmd = mx ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL; S.have_wp = 2; } }
     if ((q = strstr(t, "\nown="))) S.opt.colours = atoi(q + 5) == 1 ? C_OWN : C_ORIGINAL;      /* 2026-11-21 morning's pick.ini */
     for (i = 0; SHRINK_KEYS[i]; i++) { char k[48]; snprintf(k, sizeof k, "\nshrink.%s=", SHRINK_KEYS[i]); if ((q = strstr(t, k))) shrink_set(&S.opt, SHRINK_KEYS[i], atoi(q + strlen(k))); }
     free(t);
@@ -1633,7 +2280,7 @@ static void settings(int save) {
 static int gui(int argc, char **argv) {
     const char *shot = NULL, *test_get = NULL; char *draws[2 * MAXM]; int ndraw = 0, drawn = 0; char *sets[64]; int nsets = 0;
     const char *test_from = NULL;
-    int test_keep = 0, test_item = -1, i, k, W = 1440, H = 940, running = 1, refresh = 1, frames = 0;
+    int test_keep = 0, test_undo = 0, test_item = -1, test_redraw = -1, test_keys[8], ntest_keys = 0, test_clk[8][3], ntest_clk = 0; const char *test_find = NULL; int i, k, W = 1440, H = 940, running = 1, refresh = 1, frames = 0;
     WNDCLASSW wc; RECT rc; DWORD style = WS_OVERLAPPEDWINDOW; HDC dc; GdiFont *font; struct nk_context *ctx; char p[MAX_PATH], *t;
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION jl;
     if (argc > 1 && !strcmp(argv[1], "--selftest")) {
@@ -1645,13 +2292,18 @@ static int gui(int argc, char **argv) {
             else if (!strcmp(argv[i], "--tab") && i + 1 < argc) S.tab = atoi(argv[++i]);                   /* 1: the settings tab shown */
             else if (!strcmp(argv[i], "--from") && i + 1 < argc) test_from = argv[++i];               /* tool, upright or original */
             else if (!strcmp(argv[i], "--keep")) test_keep = 1;     /* Keep pressed too, into out\pick\selftest-game, never the game */
+            else if (!strcmp(argv[i], "--undo")) test_undo = 1;     /* and that keep undone again */
+            else if (!strcmp(argv[i], "--redraw") && i + 1 < argc) test_redraw = atoi(argv[++i]);   /* that picture thrown out, drawn again */
+            else if (!strcmp(argv[i], "--find") && i + 1 < argc) test_find = argv[++i];             /* the Find box, Enter pressed */
+            else if (!strcmp(argv[i], "--click") && i + 1 < argc && ntest_clk < 8) { test_clk[ntest_clk][2] = 1; sscanf(argv[++i], "%d,%d,%d", &test_clk[ntest_clk][0], &test_clk[ntest_clk][1], &test_clk[ntest_clk][2]); ntest_clk++; }   /* X,Y[,N]: N 1 a click, 2 a double-click, 3 a right-click */
+            else if (!strcmp(argv[i], "--key") && i + 1 < argc && ntest_keys < 8) test_keys[ntest_keys++] = atoi(argv[++i]);   /* a key pressed (Windows key code), as the window gets it */
             else if (!strcmp(argv[i], "--seeds") && i + 1 < argc) {  /* "A,B,C": the round's seeds, to redraw a known picture */
                 char *s = argv[++i]; while (*s && ntest_seeds < 64) { test_seeds[ntest_seeds++] = (unsigned)strtoul(s, &s, 10); if (*s == ',') s++; else break; } }
             else test_item = atoi(argv[i]);
         }
     }
     InitializeCriticalSection(&S.cs);
-    S.r = xmalloc(sizeof(Round) * MAXR); S.sel = -1; S.pv_for = -1; S.upitem = -1;
+    S.r = xmalloc(sizeof(Round) * MAXR); S.sel = -1; S.pv_for = -1; S.upitem = -1; S.undo_item = -1;
     S.job = CreateJobObjectA(NULL, NULL);
     if (S.job) { memset(&jl, 0, sizeof jl); jl.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE; SetInformationJobObject(S.job, JobObjectExtendedLimitInformation, &jl, sizeof jl); }
     mkdirs(WORK);
@@ -1674,6 +2326,8 @@ static int gui(int argc, char **argv) {
     }
     shrink_defaults(&S.opt);
     settings(0);
+    memset(S.tilt, -1, sizeof S.tilt); S.cmp_for = -1;
+    load_presets(); queue_load();
     for (i = 0; i < nsets; i++) { char k[40]; int v; if (sscanf(sets[i], "%39[^=]=%d", k, &v) != 2 || !shrink_set(&S.opt, k, v)) vlog(VLOG_ERR, "selftest", "--set: not a setting: %s", sets[i]); }
     if (test_item >= 0) for (i = 0; i < S.nlist; i++) if (S.list[i] == test_item) S.pos = i;
     if (ndraw) {
@@ -1697,11 +2351,19 @@ static int gui(int argc, char **argv) {
                             style | (shot ? 0 : WS_VISIBLE), shot ? -4000 : CW_USEDEFAULT, shot ? -4000 : CW_USEDEFAULT,
                             rc.right - rc.left, rc.bottom - rc.top, NULL, NULL, wc.hInstance, NULL);
     if (!S.wnd) { vlog(VLOG_ERR, "pick", "could not make the window: %s", vlog_errno()); return 1; }
+    if (!shot && S.have_wp == 2) {        /* where it was last time (pick.ini window=), if that is still on a screen */
+        RECT r = S.wp.rcNormalPosition; if (MonitorFromRect(&r, MONITOR_DEFAULTTONULL)) SetWindowPlacement(S.wnd, &S.wp); }
     dc = GetDC(S.wnd);
     font = nk_gdifont_create("Segoe UI", 16);
     ctx = nk_gdi_init(font, dc, (unsigned)W, (unsigned)H);
+    if (shot) {   /* a self-test never keeps into the real game folders (a test click or key can keep too) */
+        static char g0[MAX_PATH], g1[MAX_PATH];
+        snprintf(g0, sizeof g0, "%s\\selftest-game\\data", WORK); snprintf(g1, sizeof g1, "%s\\selftest-game\\dist", WORK);
+        GAMEDIRS[0] = g0; GAMEDIRS[1] = g1; N_GAME = 2;
+    }
     choose(S.pos);
     if (test_from) { int f; for (f = 0; f < 3; f++) if (!strcmp(test_from, FROM_NAMES[f]) && (f != FROM_UP || S.has_up)) { S.from = f; load_desc_text(S.item); } }
+    if (test_find) { snprintf(S.find, sizeof S.find, "%s", test_find); first_fit(); }
     if (shot && test_get) { if ((k = find_model(test_get)) < 0) vlog(VLOG_ERR, "selftest", "--get: no model \"%s\"", test_get); else start_get(k); }
     vlog(VLOG_INFO, "pick", "window open%s, %d items, %d models", shot ? " (self-test, off screen)" : "", S.nlist, S.nm);
     while (running) {
@@ -1723,17 +2385,27 @@ static int gui(int argc, char **argv) {
         gui_frame(ctx, rc.right > 200 ? rc.right : W, rc.bottom > 200 ? rc.bottom : H);
         {   /* a changed setting: a new generation, the shown round made again in the background */
             static ShrinkOpt last; static int have;
-            if (!have || memcmp(&last, &S.opt, sizeof last)) { if (have) { InterlockedIncrement(&S.optgen); kick_reshape(); } last = S.opt; have = 1; }
+            if (!have || memcmp(&last, &S.opt, sizeof last)) { if (have) { InterlockedIncrement(&S.optgen); kick_reshape(); if (S.own_opt) item_opt_save(S.item); } last = S.opt; have = 1; }
         }
+        queue_tick();
         nk_gdi_render(nk_rgb(30, 32, 38));
         frames++;
-        if (shot && !S.busy && !S.dl_busy && !S.rs_busy && frames > 3) {
+        if (shot && !S.busy && !S.dl_busy && !S.rs_busy && !S.qrun && frames > 3) {
+            if (ntest_clk) {   /* the mouse as the window gets it: moved there, then the button(s) */
+                static int kc, ph; static const UINT SEQ[4][5] = { { 0 }, { WM_MOUSEMOVE, WM_LBUTTONDOWN, WM_LBUTTONUP, 0 },
+                    { WM_MOUSEMOVE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_LBUTTONDBLCLK, WM_LBUTTONUP }, { WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, 0 } };
+                int n = test_clk[kc][2] >= 1 && test_clk[kc][2] <= 3 ? test_clk[kc][2] : 1; UINT msg = SEQ[n][ph];
+                PostMessageA(S.wnd, msg, msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK ? MK_LBUTTON : msg == WM_RBUTTONDOWN ? MK_RBUTTON : 0, MAKELPARAM(test_clk[kc][0], test_clk[kc][1]));
+                if (++ph == 5 || !SEQ[n][ph]) { vlog(VLOG_INFO, "selftest", "mouse %d at %d,%d", n, test_clk[kc][0], test_clk[kc][1]); ph = 0; if (++kc == ntest_clk) ntest_clk = 0; }
+                continue; }
+            if (ntest_keys) { static int kk; PostMessageA(S.wnd, WM_KEYDOWN, (WPARAM)test_keys[kk], 0); vlog(VLOG_INFO, "selftest", "key %d pressed", test_keys[kk]); if (++kk == ntest_keys) ntest_keys = 0; continue; }
+            if (test_redraw >= 0 && S.nr) { redraw_one(test_redraw); test_redraw = -1; continue; }
             if (ndraw && !drawn) { drawn = 1; if (round_size() > 0) { start_round(); continue; } vlog(VLOG_ERR, "selftest", "--draw: no ready model to draw with"); }
             if (S.nr && S.sel < 0) { for (i = 0; i < S.r[S.cur].n; i++) if (S.r[S.cur].s[i].st == ST_DONE) { S.sel = i; break; } if (S.sel >= 0) continue; }
             if (test_keep && S.sel >= 0) {
                 static char g0[MAX_PATH], g1[MAX_PATH];
                 snprintf(g0, sizeof g0, "%s\\selftest-game\\data", WORK); snprintf(g1, sizeof g1, "%s\\selftest-game\\dist", WORK);
-                GAMEDIRS[0] = g0; GAMEDIRS[1] = g1; N_GAME = 2; keep(); test_keep = 0; continue;
+                GAMEDIRS[0] = g0; GAMEDIRS[1] = g1; N_GAME = 2; keep(); if (test_undo) undo_keep(); test_keep = 0; continue;
             }
             if (frames > 6) { save_bmp(shot, W, H); vlog(VLOG_INFO, "selftest", "wrote %s", shot); break; }
         }
@@ -1808,6 +2480,7 @@ int main(int argc, char **argv) {
         }
         if (!strcmp(argv[1], "--to32")) { vlog_open(NULL, 0); vlog_echo(1); r = to32_cli(argc, argv); vlog_close(); return r; }
         if (!strcmp(argv[1], "--shrink")) { vlog_open(NULL, 0); vlog_echo(1); r = shrink_cli(argc, argv); vlog_close(); return r; }
+        if (!strcmp(argv[1], "--upright")) { vlog_open(NULL, 0); vlog_echo(1); r = upright_cli(argc, argv); vlog_close(); return r; }
         if (!strcmp(argv[1], "--shrinkcheck")) { vlog_open(NULL, 0); vlog_echo(1); r = shrinkcheck_cli(argc, argv); vlog_close(); return r; }
         return voxup_cli(argc, argv);
     }

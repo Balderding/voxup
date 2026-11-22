@@ -14,6 +14,11 @@ The commits used are in `src/third_party/VERSIONS.txt`.
   `thirdparty` folder under their own licences. A voxup.exe built this way carries their licence texts along: they are
   in that source tree (`LICENSE`, `ggml/LICENSE`, `thirdparty/`).
 
+## Ported
+- **cleanEdge** by torcado, github.com/torcado194/cleanEdge, MIT License, Copyright (c) 2022 torcado: its shader
+  (the rotation that never blends colours) is ported line for line to C in `src/upright.c`, which carries its licence
+  text.
+
 ## Followed, not copied
 - **Pillow's resampling.** `src/pick.c` (`coeffs`, `resize_f`) and `src/shrink.c` (`coeffs`, `resize_k`) work out the
   filter weights the way Pillow's `Resample.c` does, so the results match Pillow's to the pixel. Pillow's notice:

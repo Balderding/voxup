@@ -19,11 +19,12 @@
 enum { SZ_16, SZ_32, SZ_CUSTOM };
 enum { FIT_BOX, FIT_FILL, FIT_STRETCH };
 enum { SM_NONE, SM_MEDIAN, SM_BILATERAL };
-enum { M_LANCZOS, M_NEAREST, M_BOX, M_BILINEAR, M_BICUBIC, M_MITCHELL, M_GAUSS, M_MEDIAN, M_MAJORITY, M_DPID, M_SAID, M_SUPERPIXEL, M_COUNT };
+enum { M_LANCZOS, M_NEAREST, M_BOX, M_BILINEAR, M_BICUBIC, M_MITCHELL, M_GAUSS, M_MEDIAN, M_MAJORITY, M_DPID, M_SAID, M_SUPERPIXEL,
+       M_TWOSTEP, M_COUNT };
 enum { C_ORIGINAL, C_SHADES, C_OWN, C_ASDRAWN, C_KMEANS, C_MEDIANCUT };
 enum { D_RGB, D_LAB, D_REDMEAN };
 enum { DI_NONE, DI_FLOYD, DI_ATKINSON, DI_BAYER };
-enum { O_NONE, O_BLACK4, O_BLACK8, O_SELECTIVE };
+enum { O_NONE, O_BLACK4, O_BLACK8, O_SELECTIVE, O_AUTO };   /* O_AUTO: black only when the original has an outline */
 
 typedef struct {
     int size, cw, ch;              /* SZ_*; custom width and height (1 to 128) */
@@ -45,6 +46,14 @@ typedef struct {
     int othick;                    /* the outline's thickness, 1..4 pixels (1 standard) */
     int edge;                      /* without an outline: 0 rough (as shrunk), 1 smooth (the silhouette's steps evened
                                       out with whole pixels: no see-through pixels, not anti-aliasing) */
+    /* 2026-11-21, all off by default (so the defaults stay to32's): */
+    int flood;                     /* cut-out: the background also taken by a flood from the border through near-
+                                      background pixels (the pink fringe and the model's shadow go, inside holes stay) */
+    int linear;                    /* shrink in linear light (thin bright and dark edges stay, not muddied) */
+    int silhouette;                /* the shape decided on its own: half-covered pixels kept, thin lines kept (a pixel
+                                      covered more than its two neighbours across it) */
+    int regions;                   /* colours by region: each patch of like colour takes one palette colour by vote (Lab) */
+    int notch, blocks;             /* after the outline: black bites into the body filled; 2 x 2 black blocks broken */
 } ShrinkOpt;
 
 void shrink_defaults(ShrinkOpt *o);
@@ -55,5 +64,6 @@ int shrink(const unsigned char *drw, int dw, int dh, const unsigned char *orig, 
 const char *shrink_describe(const ShrinkOpt *o, char *buf, int n);       /* one line: what differs from the defaults */
 int shrink_set(ShrinkOpt *o, const char *key, int value);               /* by name (pick.ini, command line); 0 = no such */
 int shrink_get(const ShrinkOpt *o, const char *key, int *value);
+int orig_outlined(const unsigned char *rgba, int w, int h);              /* black fences the colours in */
 extern const char *const SHRINK_KEYS[];                                  /* every setting's name, NULL-ended */
 extern const char *const METHOD_NAMES[M_COUNT];

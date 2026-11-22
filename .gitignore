@@ -4,3 +4,5 @@ voxup.ini
 obj/
 out/
 *.log
+local/
+old/
