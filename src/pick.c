@@ -1998,7 +1998,7 @@ static void compare_panel(struct nk_context *ctx, Shot *s) {
         nk_layout_row_static(ctx, 96 + 34, 152, cper);
         for (j = i; j < i + cper; j++) {
             struct nk_rect b; enum nk_widget_layout_states ws;
-            if (j >= S.np) { nk_spacing(ctx, 1); continue; }
+            if (j >= S.np) break;          /* not nk_spacing: filling the row with it starts an empty one */
             ws = nk_widget(&b, ctx); if (ws == NK_WIDGET_INVALID) continue;
             cv = nk_window_get_canvas(ctx);
             nk_fill_rect(cv, nk_rect(b.x + 30, b.y, 96, 96), 0, nk_rgb(64, 68, 77));
@@ -2108,7 +2108,7 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
             if (bper < 1) bper = 1; if (bper > 3) bper = 3;
             bm[0] = S.bm_orig; bm[1] = S.bm_tool; bm[2] = S.bm_up;
             for (c0 = 0; c0 < 3; c0 += bper) {     /* as many to a row as fit the panel */
-            nk_layout_row_static(ctx, 18, 100, bper); for (c = c0; c < c0 + bper; c++) { if (c < 3) nk_label_colored(ctx, FL[c], NK_TEXT_LEFT, DIM); else nk_spacing(ctx, 1); }
+            nk_layout_row_static(ctx, 18, 100, bper); for (c = c0; c < c0 + bper && c < 3; c++) nk_label_colored(ctx, FL[c], NK_TEXT_LEFT, DIM);
             nk_layout_row_static(ctx, 100, 100, bper);
             for (c = c0; c < c0 + bper && c < 3; c++) {
                 struct nk_rect b; enum nk_widget_layout_states ws = nk_widget(&b, ctx); struct nk_command_buffer *cv;
