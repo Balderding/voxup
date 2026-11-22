@@ -30,6 +30,6 @@ clang %CLANG_FLAGS% %W% -c -o ..\obj\upright.o upright.c || exit /b 1
 clang %CLANG_FLAGS% %W% -c -o ..\obj\embed.o embed.c || exit /b 1
 clang++ %CLANG_FLAGS% -O2 -mwindows -static -o ..\voxup.exe ..\obj\pick-sd.o ..\obj\shrink.o ..\obj\voxup.o ..\obj\vlog.o ..\obj\upright.o ..\obj\embed.o ..\obj\nk_impl.o ^
   "%B%\libstable-diffusion.a" "%B%\ggml\src\ggml.a" "%B%\ggml\src\ggml-cpu.a" "%B%\ggml\src\ggml-vulkan\ggml-vulkan.a" "%B%\ggml\src\ggml-base.a" ^
-  "%VULKAN_SDK%\Lib\vulkan-1.lib" -lpthread -lwinspool -lshell32 -lole32 -loleaut32 -luuid -lcomdlg32 -ladvapi32 ^
+  "%VULKAN_SDK%\Lib\vulkan-1.lib" -Wl,--delayload=vulkan-1.dll -ldelayimp -lpthread -lwinspool -lshell32 -lole32 -loleaut32 -luuid -lcomdlg32 -ladvapi32 ^
   -lwinhttp -lgdi32 -luser32 -lmsimg32 -lshell32 -lole32 -lkernel32 -lm || exit /b 1
 echo built voxup.exe with the built-in engine

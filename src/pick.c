@@ -1278,10 +1278,22 @@ static int sd_set(sd_opt_t *o, const char *key, const char *v) {
     return sd_opt_set_string(o, key, v) == SD_STATUS_OK;
 }
 static void sd_unload(void) { if (SDX) { sd_ctx_free(SDX); SDX = NULL; SDX_MODEL = -1; vlog(VLOG_INFO, "engine", "model unloaded"); } }
+/* vulkan-1.dll comes with the graphics driver; voxup.exe loads it only when the built-in engine is used (a delay
+   import), so the window opens without it. --novulkan in the self-test acts as if it were missing. */
+static int VK_STATE = -1, TEST_NOVK;
+static int vk_there(void) {
+    if (VK_STATE < 0) {
+        HMODULE h = TEST_NOVK ? NULL : LoadLibraryA("vulkan-1.dll");
+        VK_STATE = h != NULL;
+        if (!h) vlog(VLOG_WARN, "engine", "no Vulkan graphics driver (vulkan-1.dll%s): the built-in engine cannot draw; update the graphics driver (ComfyUI can still draw)", TEST_NOVK ? ", self-test --novulkan" : " not found");
+    }
+    return VK_STATE;
+}
 static int sd_load(int model) {
     Model *M = &S.m[model]; sd_ctx_opt_t *o; int i; char v[MAX_PATH + 600]; sd_status_t st;
     if (SDX && SDX_MODEL == model) return 1;
     if (SDX_FAILED == model) return 0;
+    if (!vk_there()) { status("No Vulkan graphics driver found: update the graphics driver to draw with the built-in engine (ComfyUI can still draw)."); SDX_FAILED = model; return 0; }
     sd_unload();
     if (!(o = sd_ctx_opt_create())) return 0;
     for (i = 0; i < M->nsd; i++) if (M->sd[i].where == 'c') {
@@ -2566,6 +2578,9 @@ static int gui(int argc, char **argv) {
             else if (!strcmp(argv[i], "--find") && i + 1 < argc) test_find = argv[++i];             /* the Find box, Enter pressed */
             else if (!strcmp(argv[i], "--click") && i + 1 < argc && ntest_clk < 8) { test_clk[ntest_clk][2] = 1; sscanf(argv[++i], "%d,%d,%d", &test_clk[ntest_clk][0], &test_clk[ntest_clk][1], &test_clk[ntest_clk][2]); ntest_clk++; }   /* X,Y[,N]: N 1 a click, 2 a double-click, 3 a right-click */
             else if (!strcmp(argv[i], "--size") && i + 1 < argc) { sscanf(argv[++i], "%dx%d", &W, &H); if (W < WIN_MIN_W) W = WIN_MIN_W; if (H < WIN_MIN_H) H = WIN_MIN_H; }   /* the hidden window's size */
+#if SD_BUILT
+            else if (!strcmp(argv[i], "--novulkan")) TEST_NOVK = 1;      /* acts as if vulkan-1.dll were missing */
+#endif
             else if (!strcmp(argv[i], "--pick-folder") && i + 1 < argc) TEST_PICK = argv[++i];    /* the folder picker's answer, Choose pressed */
             else if (!strcmp(argv[i], "--split") && i + 1 < argc) test_split = argv[++i];        /* L,R: the side panels' widths, over pick.ini's */
             else if (!strcmp(argv[i], "--drag") && i + 1 < argc && ntev < 40) {   /* X1,Y1,X2,Y2: a divider dragged, as the window gets the mouse */
@@ -2596,6 +2611,9 @@ static int gui(int argc, char **argv) {
     }
     load_models();
     if (!S.nm) vlog(VLOG_ERR, "models", "no models at all: the list built into voxup.exe is missing too");
+#if SD_BUILT
+    vk_there();         /* said at the start (the Problem line), not at the first Draw */
+#endif
     for (i = 0; i < S.nm; i++) {     /* each model's prompt: out\pick\ID-prompt.txt when changed, else its standard one */
         snprintf(p, sizeof p, "%s\\%s-prompt.txt", WORK, S.m[i].id);
         if ((t = read_all(p, NULL))) { wrap(t, S.m[i].prompt, sizeof S.m[i].prompt, 34); free(t); }
