@@ -23,6 +23,9 @@
 #include <windows.h>
 #include <winhttp.h>
 #include <shlobj.h>
+#include <shellapi.h>
+#include <bcrypt.h>
+#include <wincred.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -470,12 +473,13 @@ typedef struct { int n; Shot s[MAXSHOT]; } Round;
 /* a model of models.txt: its graph, the files it needs, how many pictures a round, its prompt */
 #define MAXM 24
 #define MAXF 6
-typedef struct { char dir[32], name[112], url[512]; long long size; } MFile;
+typedef struct { char dir[32], name[112], url[512], sha[65]; long long size; } MFile;     /* sha: its SHA-256 (hex), checked after Get */
 /* the built-in engine's lines of a model ("sd ctx KEY VALUE", "sd img KEY VALUE"): where 'c' context, 'i' each picture */
 #define MAXSD 24
 typedef struct { char where, key[64], val[600]; } SdLine;
 typedef struct {
     char id[24], name[40], note[240]; int edit; char *graph; MFile f[MAXF]; int nf;
+    char licu[4][200], licn[4][80]; int nlic, gated, recommended;     /* its files' licences (asked once before Get); needs a login; the one to get first */
     int n, ready; char prompt[4096];
     /* the built-in engine: its lines; how the item's picture goes in (1 a reference picture, 2 the start picture, so
        strength says how much may change); a LoRA (models.txt "sd lora DIR NAME") at lora_w % */
@@ -517,7 +521,8 @@ static struct {
     volatile LONG sd_step, sd_steps; DWORD draw_t0; DWORD avg_ms[MAXM]; int nkeeps;
     int show_get, nget, unfocus; WINDOWPLACEMENT wp; int have_wp;   /* models to get shown; Esc in a text box; the window's place */
     int want[2], split[2], drag, drag_w, cur_we, per; float drag_x; int inl, ing, inr;
-    int empty; char empty_msg[400];             /* no sprites yet: the window asks for the folder (2026-11-22, one exe) */   /* ...; the panels' inner widths */  /* the side panels' widths: wanted (pick.ini split=), shown; a divider dragged; the grid's columns */
+    int empty; char empty_msg[400];
+    int lic_ask, need_token; char tok[256];     /* Get waits for the licence click (model + 1); a Hugging Face token asked for (never saved in a file or log) */             /* no sprites yet: the window asks for the folder (2026-11-22, one exe) */   /* ...; the panels' inner widths */  /* the side panels' widths: wanted (pick.ini split=), shown; a divider dragged; the grid's columns */
 } S;
 /* drawn inside voxup: the built-in engine is in this voxup, the model has its lines, and the engine is chosen (or the
    model has no ComfyUI graph) */
@@ -571,6 +576,11 @@ static void load_models(void) {
         } else if (!m) vlog(VLOG_WARN, "models", "%s: \"%s\" before the first model line", p, l);
         else if (!strcmp(k, "name")) snprintf(m->name, sizeof m->name, "%s", v);
         else if (!strcmp(k, "note")) snprintf(m->note, sizeof m->note, "%s", v);
+        else if (!strcmp(k, "licence") && m->nlic < 4) { char u[200] = ""; int nn = 0; sscanf(v, "%199s %n", u, &nn);
+            snprintf(m->licu[m->nlic], sizeof m->licu[0], "%s", u); snprintf(m->licn[m->nlic], sizeof m->licn[0], "%s", nn ? v + nn : u);
+            { int j, dup = 0; for (j = 0; j < m->nlic; j++) dup |= !strcmp(m->licn[j], m->licn[m->nlic]); if (!dup) m->nlic++; } }
+        else if (!strcmp(k, "gated")) m->gated = 1;
+        else if (!strcmp(k, "recommended")) m->recommended = 1;
         else if (!strcmp(k, "prompt")) m->edit = !strcmp(v, "edit") ? 1 : !strcmp(v, "tags") ? 2 : 0;
         else if (!strcmp(k, "sd")) {       /* the built-in engine: "sd ctx|img KEY VALUE", "sd image ref|init", "sd strength N", "sd lora DIR NAME N" */
             char w[16] = "", key[64] = "", a[112] = ""; int nn = 0;
@@ -584,7 +594,7 @@ static void load_models(void) {
         }
         else if (!strcmp(k, "file")) {
             MFile f; memset(&f, 0, sizeof f);
-            if (m->nf >= MAXF || sscanf(v, "%31s %111s %lld %511s", f.dir, f.name, &f.size, f.url) != 4) vlog(VLOG_WARN, "models", "%s: bad file line for %s: %s", p, m->id, v);
+            if (m->nf >= MAXF || sscanf(v, "%31s %111s %lld %511s %64s", f.dir, f.name, &f.size, f.url, f.sha) < 4) vlog(VLOG_WARN, "models", "%s: bad file line for %s: %s", p, m->id, v);
             else m->f[m->nf++] = f;
         } else vlog(VLOG_WARN, "models", "%s: unknown line: %s", p, l);
     }
@@ -1777,6 +1787,53 @@ static void dl_say(const char *fmt, ...) {
     if (S.wnd) PostMessageA(S.wnd, WM_APP, 0, 0);
 }
 static double gb(long long n) { return (double)n / 1e9; }
+static void ini_set(const char *key, const char *val);
+/* the licences clicked through (voxup.ini licence_ok = ID,ID,...): Get never downloads a model before that */
+static char LIC_OK[2048];
+static int lic_ok(int m) {
+    char k[32]; size_t n; const char *q;
+    if (!S.m[m].nlic) return 1;
+    snprintf(k, sizeof k, "%s", S.m[m].id); n = strlen(k);
+    for (q = LIC_OK; (q = strstr(q, k)); q += n) if ((q == LIC_OK || q[-1] == ',') && (q[n] == ',' || !q[n])) return 1;
+    return 0;
+}
+static void lic_accept(int m) {
+    if (lic_ok(m)) return;
+    if (LIC_OK[0]) strncat(LIC_OK, ",", sizeof LIC_OK - strlen(LIC_OK) - 1);
+    strncat(LIC_OK, S.m[m].id, sizeof LIC_OK - strlen(LIC_OK) - 1);
+    ini_set("licence_ok", LIC_OK); vlog(VLOG_INFO, "get", "%s: licence accepted", S.m[m].id);
+}
+/* the Hugging Face token: Windows' Credential Manager only (never voxup.ini, never the log) */
+#define HF_CRED L"voxup:huggingface"
+static int hf_token(char *out, size_t n) {
+    PCREDENTIALW c = NULL; int ok = 0;
+    if (CredReadW(HF_CRED, CRED_TYPE_GENERIC, 0, &c)) {
+        if (c->CredentialBlobSize && c->CredentialBlobSize < n) { memcpy(out, c->CredentialBlob, c->CredentialBlobSize); out[c->CredentialBlobSize] = 0; ok = 1; }
+        SecureZeroMemory(c->CredentialBlob, c->CredentialBlobSize); CredFree(c);
+    }
+    return ok;
+}
+static int hf_token_save(const char *t) {
+    CREDENTIALW c; memset(&c, 0, sizeof c);
+    c.Type = CRED_TYPE_GENERIC; c.TargetName = (LPWSTR)HF_CRED; c.CredentialBlobSize = (DWORD)strlen(t); c.CredentialBlob = (LPBYTE)t;
+    c.Persist = CRED_PERSIST_LOCAL_MACHINE; c.UserName = (LPWSTR)L"huggingface";
+    if (!CredWriteW(&c, 0)) { vlog(VLOG_ERR, "get", "could not keep the Hugging Face token in Credential Manager: %s", vlog_errno()); return 0; }
+    vlog(VLOG_INFO, "get", "Hugging Face token kept in Windows' Credential Manager (%s)", "voxup:huggingface"); return 1;
+}
+/* a file's SHA-256 as hex (Windows' BCrypt); 0 when it could not be read */
+static int sha256_file(const char *path, char hex[65]) {
+    BCRYPT_ALG_HANDLE a = NULL; BCRYPT_HASH_HANDLE h = NULL; unsigned char d[32]; FILE *f; static unsigned char b[1 << 20]; size_t n; int i, ok = 0;
+    if (!(f = fopen(path, "rb"))) return 0;
+    if (BCryptOpenAlgorithmProvider(&a, BCRYPT_SHA256_ALGORITHM, NULL, 0) == 0 && BCryptCreateHash(a, &h, NULL, 0, NULL, 0, 0) == 0) {
+        ok = 1;
+        while ((n = fread(b, 1, sizeof b, f)) > 0) { if (BCryptHashData(h, b, (ULONG)n, 0)) { ok = 0; break; } if (S.dl_stop) { ok = -1; break; } }
+        if (ok == 1 && BCryptFinishHash(h, d, 32, 0)) ok = 0;
+    }
+    if (h) BCryptDestroyHash(h); if (a) BCryptCloseAlgorithmProvider(a, 0);
+    fclose(f);
+    if (ok == 1) for (i = 0; i < 32; i++) sprintf(hex + i * 2, "%02x", d[i]);
+    return ok;
+}
 /* one file; 1 = there, 0 = failed (dl_msg says why), -1 = stopped */
 static int get_file(const MFile *f) {
     static HINTERNET net; wchar_t wu[1024], host[256], path[1024], hdr[100]; URL_COMPONENTS uc; HINTERNET con = NULL, rq = NULL;
@@ -1798,11 +1855,18 @@ static int get_file(const MFile *f) {
     if (con) rq = WinHttpOpenRequest(con, L"GET", path, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, uc.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0);
     if (!rq) { dl_say("Could not reach %ls for %s: %s", host, f->name, vlog_errno()); goto done; }
     WinHttpSetTimeouts(rq, 30000, 30000, 60000, 120000);
-    swprintf(hdr, 100, L"Range: bytes=%lld-", have);
-    if (!WinHttpSendRequest(rq, have ? hdr : WINHTTP_NO_ADDITIONAL_HEADERS, have ? (DWORD)-1L : 0, NULL, 0, 0, 0) || !WinHttpReceiveResponse(rq, NULL)) {
+    {   char tk[256]; int len = 0; wchar_t all[400]; all[0] = 0;
+        if (have) { swprintf(hdr, 100, L"Range: bytes=%lld-\r\n", have); wcscat(all, hdr); }
+        if (wcsstr(host, L"huggingface.co") && hf_token(tk, sizeof tk)) { wchar_t a[300]; swprintf(a, 300, L"Authorization: Bearer %hs\r\n", tk); wcscat(all, a); SecureZeroMemory(a, sizeof a); }
+        SecureZeroMemory(tk, sizeof tk); len = (int)wcslen(all);
+        if (!WinHttpSendRequest(rq, len ? all : WINHTTP_NO_ADDITIONAL_HEADERS, len ? (DWORD)-1L : 0, NULL, 0, 0, 0)) { SecureZeroMemory(all, sizeof all); code = 1; }
+        else SecureZeroMemory(all, sizeof all);
+    }
+    if (code == 1 || !WinHttpReceiveResponse(rq, NULL)) {
         dl_say("No answer for %s (%s): try Get again", f->name, vlog_errno()); goto done; }
     WinHttpQueryHeaders(rq, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &code, &sz, WINHTTP_NO_HEADER_INDEX);
-    if (code == 401 || code == 403) { dl_say("%s needs a Hugging Face login (HTTP %lu): not got", f->name, code); goto done; }
+    if (code == 401 || code == 403) { S.need_token = 1;
+        dl_say("This model needs a free Hugging Face login: make one at https://huggingface.co/join, accept the model's terms on its page, then paste a read token below (%s, HTTP %lu).", f->name, code); goto done; }
     if (code == 200) have = 0;                     /* the whole file came, not the rest: start the part again */
     else if (code != 206) { dl_say("%s: the server said HTTP %lu", f->name, code); goto done; }
     if (!(o = fopen(part, have ? "ab" : "wb"))) { dl_say("Could not write %s: %s", part, vlog_errno()); goto done; }
@@ -1818,6 +1882,18 @@ static int get_file(const MFile *f) {
     }
     fclose(o); o = NULL;
     if (have != f->size) { dl_say("%s came out %lld bytes, not %lld: kept as .part, Get tries again", f->name, have, f->size); goto done; }
+    if (f->sha[0]) {     /* the file as its maker put it up: else the part goes (a bad one never gets a real name) */
+        char hx[65]; int k;
+        dl_say("Checking %s (SHA-256)...", f->name);
+        if ((k = sha256_file(part, hx)) < 0) { r = -1; goto done; }
+        if (!k) { dl_say("Could not read %s to check it: %s", part, vlog_errno()); goto done; }
+        if (_stricmp(hx, f->sha)) {
+            vlog(VLOG_ERR, "get", "%s: SHA-256 %s, models.txt says %s: the downloaded part is removed", part, hx, f->sha);
+            if (!DeleteFileA(part)) vlog(VLOG_ERR, "get", "could not remove %s: %s", part, vlog_errno());
+            dl_say("%s came out damaged (its checksum does not match): removed, Get starts it again.", f->name); goto done;
+        }
+        vlog(VLOG_INFO, "get", "%s: SHA-256 matches", f->name);
+    }
     if (!MoveFileExA(part, dst, MOVEFILE_REPLACE_EXISTING)) { dl_say("Could not name %s: %s", dst, vlog_errno()); goto done; }
     vlog(VLOG_INFO, "get", "got %s (%lld bytes) from %s", dst, f->size, f->url);
     r = 1;
@@ -1847,7 +1923,9 @@ static DWORD WINAPI dl_worker(LPVOID arg) {
 static void start_get(int m) {
     HANDLE th;
     if (S.dl_busy || m < 0 || m >= S.nm || S.m[m].ready) return;
-    if (!P_SHARED[0]) { dl_say("Set model_files = (ComfyUI's models folder) in voxup.ini first."); return; }
+    if (!lic_ok(m)) { S.lic_ask = m + 1; return; }      /* the licence shown, one click to accept: never a download before */
+    S.lic_ask = 0;
+    if (!P_SHARED[0]) { dl_say("Set model_files = in voxup.ini first."); return; }
     S.dl_model = m; S.dl_total = model_missing(m); S.dl_done = 0; S.dl_stop = 0;
     InterlockedExchange(&S.dl_busy, 1);
     th = CreateThread(NULL, 0, dl_worker, NULL, 0, NULL);
@@ -2197,6 +2275,27 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
 #endif
         {   int nget = 0; for (i = 0; i < S.nm; i++) nget += !S.m[i].ready;
             S.nget = nget; }
+        if (S.lic_ask > 0 && S.lic_ask <= S.nm) {    /* Get pressed: the model's licences, one click to accept */
+            Model *M = &S.m[S.lic_ask - 1]; int j;
+            snprintf(lab, sizeof lab, "Before getting %s (%.1f GB): its licence%s", M->name, gb(model_missing(S.lic_ask - 1)), M->nlic > 1 ? "s" : "");
+            wrap_lab(ctx, lab, GOLD, S.inl);
+            for (j = 0; j < M->nlic; j++) {
+                static const int TW[] = { 0, 56 }; struct nk_rect lb; row_t(ctx, 22, 2, TW);
+                lb = nk_widget_bounds(ctx); nk_label_colored(ctx, M->licn[j], NK_TEXT_LEFT, strstr(M->licn[j], "Non-Commercial") ? GOLD : TEAL2);
+                if (nk_input_is_mouse_hovering_rect(&ctx->input, lb)) nk_tooltip(ctx, M->licu[j]);
+                if (button(ctx, "Read", 0, 1)) ShellExecuteA(S.wnd, "open", M->licu[j], NULL, NULL, SW_SHOWNORMAL);
+            }
+            nk_layout_row_dynamic(ctx, 28, 2);
+            if (button(ctx, "Accept and get", 1, 1)) { int mm = S.lic_ask - 1; lic_accept(mm); start_get(mm); }
+            if (button(ctx, "Not now", 0, 1)) S.lic_ask = 0;
+        }
+        {   int ready = 0, rec = -1; for (i = 0; i < S.nm; i++) { ready += S.m[i].ready; if (S.m[i].recommended && rec < 0) rec = i; }
+            if (!ready && rec >= 0 && !S.dl_busy && !S.lic_ask) {     /* nothing to draw with yet: one click */
+                wrap_lab(ctx, "Get a model first: one click.", GOLD, S.inl);
+                snprintf(lab, sizeof lab, "Get %s (%.1f GB)", S.m[rec].name, gb(model_missing(rec)));
+                nk_layout_row_dynamic(ctx, 36, 1); if (button(ctx, lab, 1, 1)) start_get(rec);
+            }
+        }
         for (i = 0; i < S.nm; i++) {
             Model *M = &S.m[i]; struct nk_rect bb; int dl = S.dl_busy && S.dl_model == i;
             if (!M->ready && !dl && !S.show_get) continue;      /* the ones still to get: folded (the row below) */
@@ -2218,6 +2317,17 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
         EnterCriticalSection(&S.cs);
         if (S.dl_busy || S.dl_msg[0]) wrap_lab(ctx, S.dl_msg, S.dl_busy ? GOLD : TEAL2, S.inl);
         LeaveCriticalSection(&S.cs);
+        if (S.need_token) {      /* a model behind a Hugging Face login: the token, shown as stars, kept by Windows */
+            static char stars[256]; size_t ol = strlen(S.tok), nl; static const int TW[] = { 0, 70 };
+            memset(stars, '*', ol); stars[ol] = 0;
+            row_t(ctx, 24, 2, TW);
+            nk_edit_string_zero_terminated(ctx, NK_EDIT_FIELD, stars, sizeof stars, nk_filter_default);
+            nl = strlen(stars);
+            if (nl > ol) { size_t j; for (j = ol; j < nl && j < sizeof S.tok - 1; j++) S.tok[j] = stars[j]; S.tok[nl < sizeof S.tok ? nl : sizeof S.tok - 1] = 0; }
+            else if (nl < ol) S.tok[nl] = 0;
+            SecureZeroMemory(stars, sizeof stars);
+            if (button(ctx, "Keep it", 1, S.tok[0] != 0)) { if (hf_token_save(S.tok)) { S.need_token = 0; dl_say("Token kept in Windows' Credential Manager: press Get again."); } SecureZeroMemory(S.tok, sizeof S.tok); }
+        }
         if (S.dl_busy) { nk_size d = (nk_size)(S.dl_done >> 20), t = (nk_size)(S.dl_total >> 20); nk_layout_row_dynamic(ctx, 14, 1); nk_progress(ctx, &d, t ? t : 1, 0); }
         if (nk_tree_push(ctx, NK_TREE_TAB, "Prompts ({d} = what it is)", NK_MINIMIZED)) {
             if (S.nm) {
@@ -2560,7 +2670,7 @@ static void empty_frame(struct nk_context *ctx, int W, int H) {   /* no sprites 
 }
 static int gui(int argc, char **argv) {
     const char *shot = NULL, *test_get = NULL; char *draws[2 * MAXM]; int ndraw = 0, drawn = 0; char *sets[64]; int nsets = 0;
-    const char *test_from = NULL, *test_split = NULL; int TEV[48][4], ntev = 0, kev = 0;
+    int test_accept = 0; const char *test_from = NULL, *test_split = NULL; int TEV[48][4], ntev = 0, kev = 0;
     int test_keep = 0, test_undo = 0, test_tab = -1, test_item = -1, test_redraw = -1, test_keys[8], ntest_keys = 0, test_clk[8][3], ntest_clk = 0; const char *test_find = NULL; int i, k, W = 1440, H = 940, running = 1, refresh = 1, frames = 0;
     WNDCLASSW wc; RECT rc; DWORD style = WS_OVERLAPPEDWINDOW; HDC dc; GdiFont *font; struct nk_context *ctx; char p[MAX_PATH], *t;
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION jl;
@@ -2581,6 +2691,7 @@ static int gui(int argc, char **argv) {
 #if SD_BUILT
             else if (!strcmp(argv[i], "--novulkan")) TEST_NOVK = 1;      /* acts as if vulkan-1.dll were missing */
 #endif
+            else if (!strcmp(argv[i], "--accept-licence")) test_accept = 1;     /* Accept and get, when the licence is asked */
             else if (!strcmp(argv[i], "--pick-folder") && i + 1 < argc) TEST_PICK = argv[++i];    /* the folder picker's answer, Choose pressed */
             else if (!strcmp(argv[i], "--split") && i + 1 < argc) test_split = argv[++i];        /* L,R: the side panels' widths, over pick.ini's */
             else if (!strcmp(argv[i], "--drag") && i + 1 < argc && ntev < 40) {   /* X1,Y1,X2,Y2: a divider dragged, as the window gets the mouse */
@@ -2697,6 +2808,7 @@ static int gui(int argc, char **argv) {
                 if (++ph == 5 || !SEQ[n][ph]) { vlog(VLOG_INFO, "selftest", "mouse %d at %d,%d", n, test_clk[kc][0], test_clk[kc][1]); ph = 0; if (++kc == ntest_clk) ntest_clk = 0; }
                 continue; }
             if (S.empty && TEST_PICK) { choose_sprites(); TEST_PICK = NULL; continue; }
+            if (S.lic_ask && test_accept) { int mm = S.lic_ask - 1; lic_accept(mm); start_get(mm); test_accept = 0; continue; }
             if (kev < ntev) {   /* a drag: posted to the hidden window one message a frame, the real mouse never moves */
                 PostMessageA(S.wnd, (UINT)TEV[kev][0], (WPARAM)TEV[kev][1], MAKELPARAM(TEV[kev][2], TEV[kev][3]));
                 if (TEV[kev][0] == WM_LBUTTONUP) vlog(VLOG_INFO, "selftest", "dragged to %d,%d: panels %d | %d", TEV[kev][2], TEV[kev][3], S.want[0], S.want[1]);
@@ -2747,6 +2859,7 @@ static void read_ini(const char *exe, int selftest) {
         else if (!strcmp(k, "comfy_paths")) snprintf(P_YAML, MAX_PATH, "%s", v);
         else if (!strcmp(k, "model_files")) snprintf(P_SHARED, MAX_PATH, "%s", v);
         else if (!strcmp(k, "game") && N_GAME < 4) { snprintf(P_GAME[N_GAME], MAX_PATH, "%s", v); GAMEDIRS[N_GAME] = P_GAME[N_GAME]; snprintf(GAMETAG[N_GAME], 16, "game%d", N_GAME + 1); N_GAME++; }
+        else if (!strcmp(k, "licence_ok")) snprintf(LIC_OK, sizeof LIC_OK, "%s", v);
         else if (!strcmp(k, "game_max")) GAME_MAX = atoi(v) > 0 ? atoi(v) : 32;
         else if (!strcmp(k, "work")) snprintf(WORK, MAX_PATH, selftest ? "%s-selftest" : "%s", v);
         else if (!strcmp(k, "models")) snprintf(MODELS, MAX_PATH, "%s", v);
