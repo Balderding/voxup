@@ -24,6 +24,7 @@
 #include <winhttp.h>
 #include <shlobj.h>
 #include <shellapi.h>
+#include <commdlg.h>
 #include <bcrypt.h>
 #include <wincred.h>
 #include <stdio.h>
@@ -57,7 +58,8 @@ HBITMAP nk_gdi_membitmap(void);
 /* ---------------------------------------------------------------- where things are */
 /* every folder comes from voxup.ini beside the exe (voxup.ini.example says what each one is) */
 static char P_SPRITES[MAX_PATH], P_NAMES[MAX_PATH], P_DESC[4][MAX_PATH], P_ENLARGED[MAX_PATH], P_COMFY[MAX_PATH], P_YAML[MAX_PATH], P_SHARED[MAX_PATH];
-static char P_UPRIGHT[4][MAX_PATH]; static int N_UPRIGHT;     /* upright = folders of NNN.png, 32 x 32, the item stood upright */
+static char P_UPRIGHT[4][MAX_PATH]; static int N_UPRIGHT;
+static char P_PALETTE[MAX_PATH];     /* voxup.ini palette = : a palette file for Colours: A palette (B8) */     /* upright = folders of NNN.png, 32 x 32, the item stood upright */
 static char P_GAME[4][MAX_PATH]; static int N_DESC, N_GAME, PORT = 8189, ITEMS_MAX = 512, GAME_MAX = 32;
 static char SKIP[512];                      /* items left out of the list (voxup.ini skip = ...) */
 static const char *GAMEDIRS[4]; static char GAMETAG[4][16];
@@ -368,13 +370,70 @@ static int upright_cli(int argc, char **argv) {
     if (!ok) { vlog(VLOG_ERR, "upright", "could not write %s", argv[3]); return 1; }
     return 0;
 }
+/* ---------------------------------------------------------------- palettes (B8): Colours "A palette" maps every pixel
+   to one of a palette's colours: a file (.hex RRGGBB lines (Lospec), GIMP .gpl, Paint.NET .txt AARRGGBB, or a .png:
+   its colours), a built-in retro one, or the set's colours (every colour of the originals the Find box lets through) */
+static const char *const PAL_NAMES[PAL_COUNT] = { "A palette file", "EGA 16", "PICO-8", "Game Boy", "C64", "The set's colours (Find)" };
+static const char *const PAL_HEX[PAL_COUNT] = { "",
+    "000000 0000AA 00AA00 00AAAA AA0000 AA00AA AA5500 AAAAAA 555555 5555FF 55FF55 55FFFF FF5555 FF55FF FFFF55 FFFFFF",
+    "000000 1D2B53 7E2553 008751 AB5236 5F574F C2C3C7 FFF1E8 FF004D FFA300 FFEC27 00E436 29ADFF 83769C FF77A8 FFCCAA",
+    "0F380F 306230 8BAC0F 9BBC0F",
+    "000000 FFFFFF 68372B 70A4B2 6F3D86 588D43 352879 B8C76F 6F4F25 433900 9A6759 444444 6C6C6C 9AD284 6C5EB5 959595", "" };
+static int pal_add(unsigned char *rgb, int n, int r, int g, int b) {
+    int i; for (i = 0; i < n; i++) if (rgb[i * 3] == r && rgb[i * 3 + 1] == g && rgb[i * 3 + 2] == b) return n;
+    if (n >= 256) return n; rgb[n * 3] = (unsigned char)r; rgb[n * 3 + 1] = (unsigned char)g; rgb[n * 3 + 2] = (unsigned char)b; return n + 1;
+}
+static int pal_hexlist(const char *t, unsigned char *rgb) {     /* RRGGBB words (a # or AA before them allowed) */
+    int n = 0; const char *p = t;
+    while (*p) { unsigned v; int len = 0;
+        while (*p && !isxdigit((unsigned char)*p)) { if (*p == ';') { while (*p && *p != '\n') p++; } else p++; }
+        while (isxdigit((unsigned char)p[len])) len++;
+        if (len == 6 || len == 8) { sscanf(p, "%x", &v); n = pal_add(rgb, n, (int)((v >> 16) & 255), (int)((v >> 8) & 255), (int)(v & 255)); }
+        p += len ? len : 1;
+    }
+    return n;
+}
+static int pal_file(const char *path, unsigned char *rgb) {
+    const char *e = strrchr(path, '.'); char *t; int n = 0;
+    if (e && !_stricmp(e, ".png")) {
+        int w, h, i; unsigned char *d = load_rgba(path, &w, &h);
+        if (!d) { vlog(VLOG_WARN, "palette", "could not read %s", path); return 0; }
+        for (i = 0; i < w * h; i++) if (d[i * 4 + 3] >= 128) n = pal_add(rgb, n, d[i * 4], d[i * 4 + 1], d[i * 4 + 2]);
+        stbi_image_free(d);
+    } else if (!(t = read_all(path, NULL))) { vlog(VLOG_WARN, "palette", "could not read %s: %s", path, vlog_errno()); return 0; }
+    else if (strncmp(t, "GIMP Palette", 12) == 0) {      /* .gpl: "R G B name" lines after the header */
+        char *l; for (l = strtok(t, "\r\n"); l; l = strtok(NULL, "\r\n")) { int r, g, b; if (*l != '#' && sscanf(l, "%d %d %d", &r, &g, &b) == 3) n = pal_add(rgb, n, r & 255, g & 255, b & 255); }
+        free(t);
+    } else { n = pal_hexlist(t, rgb); free(t); }
+    if (!n) vlog(VLOG_WARN, "palette", "%s: no colours found in it", path);
+    return n;
+}
+static int item_fits(int k);
+/* the palette for o's palid, into shrink.c; returns how many colours */
+static int palette_apply(const ShrinkOpt *o, int nlist, const int *list) {
+    unsigned char rgb[256 * 3]; int n = 0, i;
+    if (o->palid == PAL_FILE) { if (P_PALETTE[0]) n = pal_file(P_PALETTE, rgb); }
+    else if (o->palid == PAL_SET) {
+        for (i = 0; i < nlist; i++) { char p[MAX_PATH]; int w, h, j; unsigned char *d;
+            if (!item_fits(list[i])) continue;
+            snprintf(p, sizeof p, "%s\\%03d.png", P_SPRITES, list[i]);
+            if (!(d = load_rgba(p, &w, &h))) continue;
+            for (j = 0; j < w * h; j++) if (d[j * 4 + 3] >= 128) n = pal_add(rgb, n, d[j * 4], d[j * 4 + 1], d[j * 4 + 2]);
+            stbi_image_free(d); }
+    } else n = pal_hexlist(PAL_HEX[o->palid], rgb);
+    shrink_set_palette(rgb, n);
+    return n;
+}
 /* voxup --shrinkall SEEDSDIR OUTDIR [key=value ...]: every drawing there (SEEDSDIR\NNN\MODEL-sSEED.png) shrunk with
    those settings into OUTDIR\NNN-MODEL-sSEED.png, for measuring settings against each other (B7) */
 static int shrinkall_cli(int argc, char **argv) {
     WIN32_FIND_DATAA fd, fi; HANDLE h, hi; char pat[MAX_PATH]; int total = 0, i; ShrinkOpt so;
     if (argc < 4) { fprintf(stderr, "voxup --shrinkall SEEDSDIR OUTDIR [key=value ...]\n"); return 255; }
     shrink_defaults(&so);
-    for (i = 4; i < argc; i++) { char k[40]; int v; if (sscanf(argv[i], "%39[^=]=%d", k, &v) != 2 || !shrink_set(&so, k, v)) { vlog(VLOG_ERR, "shrink", "not a setting: %s", argv[i]); return 255; } }
+    for (i = 4; i < argc; i++) { char k[40]; int v;
+        if (!strncmp(argv[i], "palfile=", 8)) { snprintf(P_PALETTE, MAX_PATH, "%s", argv[i] + 8); continue; }
+        if (sscanf(argv[i], "%39[^=]=%d", k, &v) != 2 || !shrink_set(&so, k, v)) { vlog(VLOG_ERR, "shrink", "not a setting: %s", argv[i]); return 255; } }
+    if (so.colours == C_PALETTE) printf("palette: %d colours\n", palette_apply(&so, 0, NULL));
     mkdirs(argv[3]);
     snprintf(pat, sizeof pat, "%s\\*", argv[2]);
     if ((h = FindFirstFileA(pat, &fd)) == INVALID_HANDLE_VALUE) { vlog(VLOG_ERR, "check", "nothing in %s", argv[2]); return 1; }
@@ -1554,8 +1613,17 @@ static void start_round(void) {
 static int UNDOING;
 /* a shrink setting changed: a new generation, the shown round made again (the main loop each frame; keep() too, so a
    key that changes a setting and Enter in the same batch keep the new one, review 2 P3-5) */
+static int palette_apply(const ShrinkOpt *o, int nlist, const int *list);
 static void opt_check(void) {
-    static ShrinkOpt last; static int have, last_item = -1; static DWORD last_t;
+    static ShrinkOpt last; static int have, last_item = -1; static DWORD last_t; static unsigned pal_key;
+    if (S.opt.colours == C_PALETTE) {    /* a new palette (another one chosen, its file, the Find box for the set's): the round remade */
+        unsigned k = 5381u + (unsigned)S.opt.palid * 7919u; const char *c;
+        for (c = P_PALETTE; *c; c++) k = k * 33 + (unsigned char)*c;
+        if (S.opt.palid == PAL_SET) for (c = S.find; *c; c++) k = k * 31 + (unsigned char)*c;
+        if (k != pal_key) { int n; pal_key = k; stop_reshape(); n = palette_apply(&S.opt, S.nlist, S.list);
+            if (!n) status("The palette has no colours yet: %s", S.opt.palid == PAL_FILE ? "choose a palette file (Settings, Colours)." : "no item fits the Find box.");
+            InterlockedIncrement(&S.optgen); kick_reshape(); }
+    } else pal_key = 0;
     if (!have || memcmp(&last, &S.opt, sizeof last)) {
         if (have) {
             InterlockedIncrement(&S.optgen); kick_reshape(); if (S.own_opt) item_opt_save(S.item);
@@ -2034,6 +2102,8 @@ static void start_get(int m) {
     if (th) CloseHandle(th); else { InterlockedExchange(&S.dl_busy, 0); dl_say("Could not start getting it: %s", vlog_errno()); }
 }
 
+static void choose_palette(void);
+static const char *TEST_PICK;      /* the self-test's answer to a folder or file picker (--pick-folder, --pick-file) */
 /* ---------------------------------------------------------------- the window */
 /* every text colour at least 4.5 : 1 against the ground it is drawn on (WCAG 2; --contrast in the self-test lists them).
    TEAL2 is for lines and frames only; TEALT is teal for text. No red anywhere. (B1, 2026-11-22) */
@@ -2126,7 +2196,6 @@ static void s_note(struct nk_context *ctx, const char *t) { nk_ext_wrap_label(ct
 static void settings_panel(struct nk_context *ctx) {
     static const char *const SIZE[] = { "16 x 16", "32 x 32", "Any size (type it)" }, *const FIT[] = { "The original's box", "The whole sprite", "Stretched to fill" };
     static const char *const SMOOTH[] = { "None", "Median 3 x 3", "Bilateral (keeps edges)" };
-    static const char *const COL[] = { "The original's", "Original's + shades", "The model's own", "Model's own, as drawn", "N found (k-means)", "N found (median cut)", "N found (Wu)" };
     static const char *const DIST[] = { "RGB", "Lab (as seen)", "Weighted RGB" }, *const DITH[] = { "None", "Floyd-Steinberg", "Atkinson", "Ordered (Bayer 4x4)" };
     static const char *const LINE[] = { "Take it off", "Leave it" }, *const OUTL[] = { "None", "Black", "Black, corners too", "Selective (darker shade)", "Auto (as the original)" };
     static const char *const EDGE[] = { "Rough (as shrunk)", "Smooth (whole pixels)" };
@@ -2183,8 +2252,23 @@ static void settings_panel(struct nk_context *ctx) {
     s_int(ctx, "Fill pinholes", &o->pinholes, 0, 3, 1);
     }
     if (s_section(ctx, "Colours", 4)) {
-    if (o->colours >= C_KMEANS) s_note(ctx, "Colours: found from the drawing (under More methods).");
-    else s_combo(ctx, "Colours", COL, 4, &o->colours);         /* the colour finders: under More methods */
+    if (o->colours >= C_KMEANS && o->colours != C_PALETTE) s_note(ctx, "Colours: found from the drawing (under More methods).");
+    else {      /* the colour finders: under More methods; A palette: here (B8) */
+        static const char *const CB[] = { "The original's", "Original's + shades", "The model's own", "Model's own, as drawn", "A palette (a file or a retro one)" };
+        int ci = o->colours == C_PALETTE ? 4 : o->colours, c0 = ci;
+        s_combo(ctx, "Colours", CB, 5, &ci);
+        if (ci != c0) o->colours = ci == 4 ? C_PALETTE : ci;
+    }
+    if (o->colours == C_PALETTE) {
+        s_combo(ctx, "Palette", PAL_NAMES, PAL_COUNT, &o->palid);
+        if (o->palid == PAL_FILE) {
+            static const int TW[] = { 0, 90 }; char lab[MAX_PATH + 20]; const char *b = strrchr(P_PALETTE, '\\');
+            nk_ext_row(ctx, 24, 2, TW);
+            snprintf(lab, sizeof lab, "%s", P_PALETTE[0] ? (b ? b + 1 : P_PALETTE) : "(no file yet)"); nk_label_colored(ctx, lab, NK_TEXT_LEFT, P_PALETTE[0] ? TEALT : DIM);
+            if (button(ctx, "Choose...", !P_PALETTE[0], 1)) choose_palette();
+            s_note(ctx, ".hex (Lospec), .gpl (GIMP), .txt (Paint.NET) or a .png of the colours.");
+        } else if (o->palid == PAL_SET) s_note(ctx, "Every colour of the originals the Find box lets through: one palette for a set of items.");
+    }
     if (o->colours != C_OWN && o->colours != C_ASDRAWN) {
         s_combo(ctx, "Nearest by", DIST, 3, &o->dist);
         s_combo(ctx, "Dithering", DITH, 4, &o->dither);
@@ -2848,7 +2932,6 @@ static void ini_first(void) {
     if (write_all(p, t, strlen(t))) vlog(VLOG_INFO, "ini", "first start: wrote %s", p);
 }
 /* Windows' own folder picker; the self-test gives the answer itself (--pick-folder DIR) */
-static const char *TEST_PICK;
 static int pick_folder(char *out, size_t n) {
     BROWSEINFOW bi; PIDLIST_ABSOLUTE id; wchar_t w[MAX_PATH];
     if (TEST_PICK) { snprintf(out, n, "%s", TEST_PICK); return 1; }
@@ -2858,6 +2941,17 @@ static int pick_folder(char *out, size_t n) {
     if (!(id = SHBrowseForFolderW(&bi))) return 0;
     if (!SHGetPathFromIDListW(id, w)) { CoTaskMemFree(id); return 0; }
     CoTaskMemFree(id); WideCharToMultiByte(CP_UTF8, 0, w, -1, out, (int)n, NULL, NULL); return 1;
+}
+static void ini_set(const char *key, const char *val);
+static void choose_palette(void) {     /* Windows' own file dialog; the choice is kept in voxup.ini palette = (B8) */
+    OPENFILENAMEA of; char f[MAX_PATH] = "";
+    if (TEST_PICK) snprintf(f, sizeof f, "%s", TEST_PICK);
+    else {
+        memset(&of, 0, sizeof of); of.lStructSize = sizeof of; of.hwndOwner = S.wnd; of.lpstrFile = f; of.nMaxFile = sizeof f;
+        of.lpstrFilter = "Palettes (*.hex;*.gpl;*.txt;*.png)\0*.hex;*.gpl;*.txt;*.png\0All files\0*.*\0"; of.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+        if (!GetOpenFileNameA(&of)) return;
+    }
+    snprintf(P_PALETTE, MAX_PATH, "%s", f); ini_set("palette", f); status("Palette: %s", f);
 }
 static void choose_sprites(void) {
     char d[MAX_PATH];
@@ -3083,6 +3177,7 @@ static void read_ini(const char *exe, int selftest) {
         else if (!strcmp(k, "comfy_paths")) snprintf(P_YAML, MAX_PATH, "%s", v);
         else if (!strcmp(k, "model_files")) snprintf(P_SHARED, MAX_PATH, "%s", v);
         else if (!strcmp(k, "game") && N_GAME < 4) { snprintf(P_GAME[N_GAME], MAX_PATH, "%s", v); GAMEDIRS[N_GAME] = P_GAME[N_GAME]; snprintf(GAMETAG[N_GAME], 16, "game%d", N_GAME + 1); N_GAME++; }
+        else if (!strcmp(k, "palette")) snprintf(P_PALETTE, MAX_PATH, "%s", v);
         else if (!strcmp(k, "licence_ok")) snprintf(LIC_OK, sizeof LIC_OK, "%s", v);
         else if (!strcmp(k, "game_max")) GAME_MAX = atoi(v) > 0 ? atoi(v) : 32;
         else if (!strcmp(k, "work")) snprintf(WORK, MAX_PATH, selftest ? "%s-selftest" : "%s", v);

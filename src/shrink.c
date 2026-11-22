@@ -57,13 +57,13 @@ static const Key KEYS[] = {
     K(contrast, -100, 100), K(brightness, -100, 100), K(saturation, -100, 100), K(smooth, 0, 2), K(sharpen, 0, 300),
     K(method, 0, M_COUNT - 1), K(dpid_lambda, 0, 300), K(said_gamma, 0, 400), K(said_alpha, 0, 200), K(said_beta, 0, 200),
     K(sp_m, 1, 100), K(sp_iter, 1, 30),
-    K(pinholes, 0, 3), K(colours, 0, 6), K(ncol, 2, 32), K(dist, 0, 2), K(dither, 0, 3), K(dither_amt, 0, 100),
-    K(black, 0, 128), K(pink, 0, 100), K(peel, 0, 4), K(orphans, 0, 1), K(jaggies, 0, 1), K(edgestray, 0, 1), K(kmpp, 0, 1), K(outline, 0, 4), K(othick, 1, 4), K(edge, 0, 1),
+    K(pinholes, 0, 3), K(colours, 0, 7), K(ncol, 2, 32), K(dist, 0, 2), K(dither, 0, 3), K(dither_amt, 0, 100),
+    K(black, 0, 128), K(pink, 0, 100), K(peel, 0, 4), K(orphans, 0, 1), K(jaggies, 0, 1), K(edgestray, 0, 1), K(kmpp, 0, 1), K(palid, 0, 5), K(outline, 0, 4), K(othick, 1, 4), K(edge, 0, 1),
     K(flood, 0, 1), K(linear, 0, 1), K(silhouette, 0, 1), K(regions, 0, 1), K(notch, 0, 1), K(blocks, 0, 1),
 };
 const char *const SHRINK_KEYS[] = { "size", "cw", "ch", "fit", "margin", "bg_dist", "magenta", "alpha_cut", "contrast", "brightness",
     "saturation", "smooth", "sharpen", "method", "dpid_lambda", "said_gamma", "said_alpha", "said_beta", "sp_m", "sp_iter",
-    "pinholes", "colours", "ncol", "dist", "dither", "dither_amt", "black", "pink", "peel", "orphans", "jaggies", "edgestray", "kmpp", "outline", "othick", "edge",
+    "pinholes", "colours", "ncol", "dist", "dither", "dither_amt", "black", "pink", "peel", "orphans", "jaggies", "edgestray", "kmpp", "palid", "outline", "othick", "edge",
     "flood", "linear", "silhouette", "regions", "notch", "blocks", NULL };
 int shrink_set(ShrinkOpt *o, const char *key, int v) {
     size_t i;
@@ -650,6 +650,8 @@ static int wu(const unsigned char *px, int W, int H, int N, int (*pal)[3]) {
     return i;
 }
 #undef WI
+static unsigned char GPAL[256 * 3]; static int GPAL_N;
+void shrink_set_palette(const unsigned char *rgb, int n) { if (n > 256) n = 256; if (n < 0) n = 0; if (n) memcpy(GPAL, rgb, (size_t)n * 3); GPAL_N = n; }
 typedef struct { int lo, hi; } Box;
 static int g_axis;
 static int cmp_axis(const void *a, const void *b) { return ((const int *)a)[g_axis] - ((const int *)b)[g_axis]; }
@@ -829,8 +831,9 @@ int shrink(const unsigned char *drw, int dw, int dh, const unsigned char *orig, 
         }
         if (o->colours == C_KMEANS) np = kmeans(out, W, H, o->ncol, pal, o->dist, o->kmpp);
         if (o->colours == C_WU) np = wu(out, W, H, o->ncol, pal);
+        if (o->colours == C_PALETTE && GPAL_N) { for (np = 0; np < GPAL_N; np++) { pal[np][0] = GPAL[np * 3]; pal[np][1] = GPAL[np * 3 + 1]; pal[np][2] = GPAL[np * 3 + 2]; } }
         if (o->colours == C_MEDIANCUT) np = mediancut(out, W, H, o->ncol, pal);
-        usepal = o->colours == C_ORIGINAL || o->colours == C_SHADES || o->colours == C_KMEANS || o->colours == C_MEDIANCUT || o->colours == C_WU;
+        usepal = o->colours == C_ORIGINAL || o->colours == C_SHADES || o->colours == C_KMEANS || o->colours == C_MEDIANCUT || o->colours == C_WU || (o->colours == C_PALETTE && GPAL_N);
         if (np && usepal && o->regions && !o->dither) {
             /* by region: patches of like colour (Lab within 12 of the patch's first pixel, 4-connected) each take the
                palette colour most of their pixels are nearest to (Lab) */
