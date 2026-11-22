@@ -513,6 +513,7 @@ static struct {
     int cmp_for; LONG cmp_gen; HBITMAP cmp_bm[17]; int cmp_w[17], cmp_h[17]; char cmp_score[17][64];
     volatile LONG sd_step, sd_steps; DWORD draw_t0; DWORD avg_ms[MAXM]; int nkeeps;
     int show_get, nget, unfocus; WINDOWPLACEMENT wp; int have_wp;   /* models to get shown; Esc in a text box; the window's place */
+    int want[2], split[2], drag, drag_w, cur_we, per; float drag_x;  /* the side panels' widths: wanted (pick.ini split=), shown; a divider dragged; the grid's columns */
 } S;
 /* drawn inside voxup: the built-in engine is in this voxup, the model has its lines, and the engine is chosen (or the
    model has no ComfyUI graph) */
@@ -1701,7 +1702,7 @@ static void move_sel(int dx, int dy) {
     Round *R; int k;
     if (!S.nr) return;
     R = &S.r[S.cur]; if (!R->n) return;
-    k = S.sel < 0 ? 0 : S.sel + dx + dy * 5;
+    k = S.sel < 0 ? 0 : S.sel + dx + dy * (S.per > 0 ? S.per : 5);     /* up/down: a row of the grid as it is laid out now */
     if (k < 0) k = 0;
     if (k >= R->n) k = R->n - 1;
     S.sel = k; if (S.tab == 1) S.tab = 0;
@@ -2001,13 +2002,54 @@ static void compare_panel(struct nk_context *ctx, Shot *s) {
     nk_layout_row_dynamic(ctx, 50, 1);
     nk_label_colored_wrap(ctx, "fit: how much the sprite and the original's (or the upright picture's) shape cover each other. col (only when the colours are not the original's): how far they are from the original's. lone: the share of single pixels of a colour.", DIM);
 }
+/* the lines between the panels (2026-11-22): drag one to make the panels beside it wider or narrower, double-click it
+   for its standard place; the widths are kept in pick.ini (split=) and the grid takes what is left */
+static void settings(int save);
+enum { SPLIT_W = 8, LEFT_MIN = 270, RIGHT_MIN = 290, GRID_MIN = 160, LEFT_DEF = 330, RIGHT_DEF = 330, WIN_MIN_W = 900, WIN_MIN_H = 600 };
+static void split_fit(int avail, int *gw) {     /* the wanted widths fitted into the window: the sides give way, never below their least */
+    int l = S.want[0] < LEFT_MIN ? LEFT_MIN : S.want[0], r = S.want[1] < RIGHT_MIN ? RIGHT_MIN : S.want[1], room = avail - GRID_MIN;
+    if (l + r > room) {
+        int over = l + r - room, el = l - LEFT_MIN, er = r - RIGHT_MIN, dl;
+        if (el + er > 0) { dl = el + er > over ? over * el / (el + er) : el; l -= dl; r -= el + er > over ? over - dl : er; }
+    }
+    S.split[0] = l; S.split[1] = r; *gw = avail - l - r; if (*gw < 40) *gw = 40;
+}
+static void split_bar(struct nk_context *ctx, int which) {
+    struct nk_rect b; struct nk_input *in = &ctx->input; enum nk_widget_layout_states ws = nk_widget(&b, ctx); int hov;
+    if (ws == NK_WIDGET_INVALID) return;
+    hov = nk_input_is_mouse_hovering_rect(in, b);
+    if (hov || S.drag == which) S.cur_we = 1;
+    if (ws == NK_WIDGET_VALID && nk_input_is_mouse_click_down_in_rect(in, NK_BUTTON_DOUBLE, b, nk_true)) {
+        S.want[which - 1] = which == 1 ? LEFT_DEF : RIGHT_DEF; S.drag = 0; status("Panel put back to its standard width.");
+    } else if (ws == NK_WIDGET_VALID && !S.drag && nk_input_is_mouse_click_down_in_rect(in, NK_BUTTON_LEFT, b, nk_true)) {
+        S.drag = which; S.drag_x = in->mouse.pos.x; S.drag_w = S.split[which - 1]; S.want[which - 1] = S.drag_w;
+    }
+    nk_fill_rect(nk_window_get_canvas(ctx), nk_rect(b.x + SPLIT_W / 2 - 1, b.y + 4, hov || S.drag == which ? 3.0f : 2.0f, b.h - 8), 0,
+                 hov || S.drag == which ? TEAL2 : nk_rgb(70, 74, 84));
+    if (hov && !S.drag) nk_tooltip(ctx, "Drag: wider or narrower. Double-click: the standard width.");
+}
 static int gui_frame(struct nk_context *ctx, int W, int H) {
-    char lab[700]; int i, busy = S.busy != 0;
+    char lab[700]; int i, busy = S.busy != 0, gw;
     if (!nk_begin(ctx, "voxup", nk_rect(0, 0, (float)W, (float)H), NK_WINDOW_NO_SCROLLBAR)) { nk_end(ctx); return 0; }
     if (S.unfocus) { nk_edit_unfocus(ctx); S.unfocus = 0; }
-    nk_layout_row_begin(ctx, NK_STATIC, (float)(H - 16), 3);
+    {   /* the panels' widths: a divider being dragged moves its panel's edge with the mouse */
+        int avail = W - (int)(2 * ctx->style.window.padding.x + 4 * ctx->style.window.spacing.x) - 2 * SPLIT_W - 4;
+        S.cur_we = 0;
+        if (S.drag && !ctx->input.mouse.buttons[NK_BUTTON_LEFT].down) { S.drag = 0; settings(1); }
+        if (S.drag) {
+            int dx = (int)(ctx->input.mouse.pos.x - S.drag_x), v = S.drag == 1 ? S.drag_w + dx : S.drag_w - dx;
+            int most = avail - GRID_MIN - (S.drag == 1 ? S.split[1] : S.split[0]), least = S.drag == 1 ? LEFT_MIN : RIGHT_MIN;
+            S.want[S.drag - 1] = v > most ? most : v < least ? least : v;
+        }
+        split_fit(avail, &gw);
+        {   /* the grid's columns: as many 128-pixel pictures as fit beside each other */
+            int inner = gw - (int)(2 * ctx->style.window.group_padding.x + ctx->style.window.scrollbar_size.x) - 8;
+            S.per = (inner + 4) / 132; if (S.per < 1) S.per = 1; if (S.per > 10) S.per = 10;
+        }
+    }
+    nk_layout_row_begin(ctx, NK_STATIC, (float)(H - 16), 5);
     /* left: the item */
-    nk_layout_row_push(ctx, 330);
+    nk_layout_row_push(ctx, (float)S.split[0]);
     if (nk_group_begin(ctx, "item", NK_WINDOW_BORDER)) {
         {   /* Find: the list, < > and PgUp/PgDn keep to the items that fit; Enter goes to the first */
             struct nk_rect bb; nk_flags ef; char old[48]; snprintf(old, sizeof old, "%s", S.find);
@@ -2167,8 +2209,9 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
         }
         nk_group_end(ctx);
     }
+    nk_layout_row_push(ctx, SPLIT_W); split_bar(ctx, 1);
     /* middle: the round's pictures */
-    nk_layout_row_push(ctx, 5 * 140 + 40);
+    nk_layout_row_push(ctx, (float)gw);
     if (nk_group_begin(ctx, "grid", NK_WINDOW_BORDER)) {
         Round *R = S.nr ? &S.r[S.cur] : NULL; int r, c, kdone = 0, dbl = -1, rclick = -1;
         /* Draw and Stop over the pictures, the status line under them: always in sight */
@@ -2222,10 +2265,10 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
         nk_layout_row_dynamic(ctx, 18, 1);
         nk_label_colored(ctx, "Click: look at it   Double-click / Enter: keep   Right-click / Del: draw that one again   Space / Ctrl+Enter: draw   Esc: stop", NK_TEXT_LEFT, DIM);
         nk_label_colored(ctx, "Arrows: choose   PgUp/PgDn: item   Home/End: round   Ctrl+Z: undo keep   Ctrl+F: find   Q / R: queue / run it   1 2 3: panels   F1..: presets", NK_TEXT_LEFT, DIM);
-        for (r = 0; R && r * 5 < R->n; r++) {
-            nk_layout_row_static(ctx, 128 + 20, 128, 5);
-            for (c = 0; c < 5; c++) {
-                struct nk_rect b; enum nk_widget_layout_states ws; struct nk_command_buffer *cv; Shot *s; int k = r * 5 + c;
+        for (r = 0; R && r * S.per < R->n; r++) {
+            nk_layout_row_static(ctx, 128 + 20, 128, S.per);
+            for (c = 0; c < S.per; c++) {
+                struct nk_rect b; enum nk_widget_layout_states ws; struct nk_command_buffer *cv; Shot *s; int k = r * S.per + c;
                 const struct nk_user_font *f = ctx->style.font; char t[64];
                 if (k >= R->n) { nk_spacing(ctx, 1); continue; }
                 s = &R->s[k];
@@ -2273,8 +2316,9 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
         if (rclick >= 0) redraw_one(rclick);
         else if (dbl >= 0) { S.sel = dbl; keep_next(); }
     }
+    nk_layout_row_push(ctx, SPLIT_W); split_bar(ctx, 2);
     /* right: the chosen one, and Keep */
-    nk_layout_row_push(ctx, (float)(W - 330 - 5 * 140 - 40 - 40));
+    nk_layout_row_push(ctx, (float)S.split[1]);
     if (nk_group_begin(ctx, "chosen", NK_WINDOW_BORDER)) {
         Shot *s = S.sel >= 0 && S.nr && S.sel < S.r[S.cur].n ? &S.r[S.cur].s[S.sel] : NULL;
         nk_layout_row_dynamic(ctx, 28, 3);
@@ -2323,6 +2367,12 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
 static LRESULT CALLBACK wndproc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
     if (m == WM_DESTROY) { S.wp.length = sizeof S.wp; S.have_wp = GetWindowPlacement(w, &S.wp) != 0; PostQuitMessage(0); return 0; }
     if (m == WM_APP) return 0;
+    if (m == WM_SETCURSOR && LOWORD(lp) == HTCLIENT && (S.cur_we || S.drag)) { SetCursor(LoadCursor(NULL, IDC_SIZEWE)); return TRUE; }   /* over a divider */
+    if (m == WM_GETMINMAXINFO) {   /* never smaller than the three panels at their least (Draw, Keep and the original stay in sight) */
+        RECT r = { 0, 0, WIN_MIN_W, WIN_MIN_H }; MINMAXINFO *mi = (MINMAXINFO *)lp;
+        AdjustWindowRectEx(&r, WS_OVERLAPPEDWINDOW, FALSE, WS_EX_APPWINDOW);
+        mi->ptMinTrackSize.x = r.right - r.left; mi->ptMinTrackSize.y = r.bottom - r.top; return 0;
+    }
     if (m == WM_CLOSE && S.busy) {
         InterlockedExchange(&S.stop, 1);
 #if SD_BUILT
@@ -2360,7 +2410,7 @@ static void settings(int save) {
         for (m = 0; m < S.nm; m++) { snprintf(l, sizeof l, "n.%s=%d\r\n", S.m[m].id, S.m[m].n); buf_str(&b, l); }
         for (m = 0; m < S.nm; m++) if (S.m[m].sdimage == 2) { snprintf(l, sizeof l, "strength.%s=%d\r\n", S.m[m].id, S.m[m].strength); buf_str(&b, l); }
         for (m = 0; m < S.nm; m++) if (S.m[m].has_lora) { snprintf(l, sizeof l, "lora.%s=%d\r\n", S.m[m].id, S.m[m].lora_w); buf_str(&b, l); }
-        snprintf(l, sizeof l, "engine=%d\r\n", S.engine); buf_str(&b, l);
+        snprintf(l, sizeof l, "engine=%d\r\nsplit=%d,%d\r\n", S.engine, S.want[0], S.want[1]); buf_str(&b, l);
         write_all(p, b.p, b.n); free(b.p); return;
     }
     for (m = 0; m < S.nm; m++) S.m[m].n = !strcmp(S.m[m].id, "klein") || !strcmp(S.m[m].id, "kontext") ? 10 : 0;
@@ -2378,6 +2428,7 @@ static void settings(int save) {
     }
     if (!any) for (m = 0; m < S.nm; m++) if (S.m[m].ready) { S.m[m].n = 10; if (++any == 2) break; }
     if ((q = strstr(t, "\nengine="))) S.engine = atoi(q + 8) == 1;
+    if ((q = strstr(t, "\nsplit="))) { int a, b2; if (sscanf(q + 7, "%d,%d", &a, &b2) == 2 && a >= LEFT_MIN && a < 4000 && b2 >= RIGHT_MIN && b2 < 4000) { S.want[0] = a; S.want[1] = b2; } }
     if ((q = strstr(t, "\nauto_next="))) S.auto_next = atoi(q + 11) == 1;
     if ((q = strstr(t, "\ntab="))) S.tab = atoi(q + 5) >= 0 && atoi(q + 5) <= 2 ? atoi(q + 5) : 0;
     if ((q = strstr(t, "\nshow_get="))) S.show_get = atoi(q + 10) == 1;
@@ -2392,7 +2443,7 @@ static void settings(int save) {
 
 static int gui(int argc, char **argv) {
     const char *shot = NULL, *test_get = NULL; char *draws[2 * MAXM]; int ndraw = 0, drawn = 0; char *sets[64]; int nsets = 0;
-    const char *test_from = NULL;
+    const char *test_from = NULL, *test_split = NULL; int TEV[48][4], ntev = 0, kev = 0;
     int test_keep = 0, test_undo = 0, test_tab = -1, test_item = -1, test_redraw = -1, test_keys[8], ntest_keys = 0, test_clk[8][3], ntest_clk = 0; const char *test_find = NULL; int i, k, W = 1440, H = 940, running = 1, refresh = 1, frames = 0;
     WNDCLASSW wc; RECT rc; DWORD style = WS_OVERLAPPEDWINDOW; HDC dc; GdiFont *font; struct nk_context *ctx; char p[MAX_PATH], *t;
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION jl;
@@ -2409,6 +2460,15 @@ static int gui(int argc, char **argv) {
             else if (!strcmp(argv[i], "--redraw") && i + 1 < argc) test_redraw = atoi(argv[++i]);   /* that picture thrown out, drawn again */
             else if (!strcmp(argv[i], "--find") && i + 1 < argc) test_find = argv[++i];             /* the Find box, Enter pressed */
             else if (!strcmp(argv[i], "--click") && i + 1 < argc && ntest_clk < 8) { test_clk[ntest_clk][2] = 1; sscanf(argv[++i], "%d,%d,%d", &test_clk[ntest_clk][0], &test_clk[ntest_clk][1], &test_clk[ntest_clk][2]); ntest_clk++; }   /* X,Y[,N]: N 1 a click, 2 a double-click, 3 a right-click */
+            else if (!strcmp(argv[i], "--size") && i + 1 < argc) { sscanf(argv[++i], "%dx%d", &W, &H); if (W < WIN_MIN_W) W = WIN_MIN_W; if (H < WIN_MIN_H) H = WIN_MIN_H; }   /* the hidden window's size */
+            else if (!strcmp(argv[i], "--split") && i + 1 < argc) test_split = argv[++i];        /* L,R: the side panels' widths, over pick.ini's */
+            else if (!strcmp(argv[i], "--drag") && i + 1 < argc && ntev < 40) {   /* X1,Y1,X2,Y2: a divider dragged, as the window gets the mouse */
+                int x1 = 0, y1 = 0, x2 = 0, y2 = 0, st; sscanf(argv[++i], "%d,%d,%d,%d", &x1, &y1, &x2, &y2);
+                TEV[ntev][0] = WM_MOUSEMOVE; TEV[ntev][1] = 0; TEV[ntev][2] = x1; TEV[ntev++][3] = y1;
+                TEV[ntev][0] = WM_LBUTTONDOWN; TEV[ntev][1] = MK_LBUTTON; TEV[ntev][2] = x1; TEV[ntev++][3] = y1;
+                for (st = 1; st <= 4; st++) { TEV[ntev][0] = WM_MOUSEMOVE; TEV[ntev][1] = MK_LBUTTON; TEV[ntev][2] = x1 + (x2 - x1) * st / 4; TEV[ntev++][3] = y1 + (y2 - y1) * st / 4; }
+                TEV[ntev][0] = WM_LBUTTONUP; TEV[ntev][1] = 0; TEV[ntev][2] = x2; TEV[ntev++][3] = y2;
+            }
             else if (!strcmp(argv[i], "--key") && i + 1 < argc && ntest_keys < 8) test_keys[ntest_keys++] = atoi(argv[++i]);   /* a key pressed (Windows key code), as the window gets it */
             else if (!strcmp(argv[i], "--seeds") && i + 1 < argc) {  /* "A,B,C": the round's seeds, to redraw a known picture */
                 char *s = argv[++i]; while (*s && ntest_seeds < 64) { test_seeds[ntest_seeds++] = (unsigned)strtoul(s, &s, 10); if (*s == ',') s++; else break; } }
@@ -2416,6 +2476,7 @@ static int gui(int argc, char **argv) {
         }
     }
     InitializeCriticalSection(&S.cs);
+    S.want[0] = LEFT_DEF; S.want[1] = RIGHT_DEF; S.per = 5;
     S.r = xmalloc(sizeof(Round) * MAXR); S.sel = -1; S.pv_for = -1; S.upitem = -1; S.undo_item = -1;
     S.job = CreateJobObjectA(NULL, NULL);
     if (S.job) { memset(&jl, 0, sizeof jl); jl.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE; SetInformationJobObject(S.job, JobObjectExtendedLimitInformation, &jl, sizeof jl); }
@@ -2440,6 +2501,7 @@ static int gui(int argc, char **argv) {
     shrink_defaults(&S.opt);
     settings(0);
     if (test_tab >= 0 && test_tab <= 2) S.tab = test_tab;
+    if (test_split) { int a, b2; if (sscanf(test_split, "%d,%d", &a, &b2) == 2) { S.want[0] = a; S.want[1] = b2; } }
     memset(S.tilt, -1, sizeof S.tilt); S.cmp_for = -1;
     load_presets(); queue_load();
     for (i = 0; i < nsets; i++) { char k[40]; int v; if (sscanf(sets[i], "%39[^=]=%d", k, &v) != 2 || !shrink_set(&S.opt, k, v)) vlog(VLOG_ERR, "selftest", "--set: not a setting: %s", sets[i]); }
@@ -2512,6 +2574,10 @@ static int gui(int argc, char **argv) {
                 PostMessageA(S.wnd, msg, msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK ? MK_LBUTTON : msg == WM_RBUTTONDOWN ? MK_RBUTTON : 0, MAKELPARAM(test_clk[kc][0], test_clk[kc][1]));
                 if (++ph == 5 || !SEQ[n][ph]) { vlog(VLOG_INFO, "selftest", "mouse %d at %d,%d", n, test_clk[kc][0], test_clk[kc][1]); ph = 0; if (++kc == ntest_clk) ntest_clk = 0; }
                 continue; }
+            if (kev < ntev) {   /* a drag: posted to the hidden window one message a frame, the real mouse never moves */
+                PostMessageA(S.wnd, (UINT)TEV[kev][0], (WPARAM)TEV[kev][1], MAKELPARAM(TEV[kev][2], TEV[kev][3]));
+                if (TEV[kev][0] == WM_LBUTTONUP) vlog(VLOG_INFO, "selftest", "dragged to %d,%d: panels %d | %d", TEV[kev][2], TEV[kev][3], S.want[0], S.want[1]);
+                kev++; continue; }
             if (ntest_keys) { static int kk; PostMessageA(S.wnd, WM_KEYDOWN, (WPARAM)test_keys[kk], 0); vlog(VLOG_INFO, "selftest", "key %d pressed", test_keys[kk]); if (++kk == ntest_keys) ntest_keys = 0; continue; }
             if (test_redraw >= 0 && S.nr) { redraw_one(test_redraw); test_redraw = -1; continue; }
             if (ndraw && !drawn) { drawn = 1; if (round_size() > 0) { start_round(); continue; } vlog(VLOG_ERR, "selftest", "--draw: no ready model to draw with"); }
@@ -2521,7 +2587,7 @@ static int gui(int argc, char **argv) {
                 snprintf(g0, sizeof g0, "%s\\selftest-game\\data", WORK); snprintf(g1, sizeof g1, "%s\\selftest-game\\dist", WORK);
                 GAMEDIRS[0] = g0; GAMEDIRS[1] = g1; N_GAME = 2; snprintf(GAMETAG[0], 16, "data"); snprintf(GAMETAG[1], 16, "dist"); keep(); if (test_undo) undo_keep(); test_keep = 0; continue;
             }
-            if (frames > 6) { save_bmp(shot, W, H); vlog(VLOG_INFO, "selftest", "wrote %s", shot); break; }
+            if (frames > 6) { save_bmp(shot, W, H); vlog(VLOG_INFO, "selftest", "wrote %s (%d x %d, panels %d | grid %d columns | %d)", shot, W, H, S.split[0], S.per, S.split[1]); break; }
         }
     }
     if (S.busy) { InterlockedExchange(&S.stop, 1); for (i = 0; i < 100 && S.busy; i++) Sleep(100); }
