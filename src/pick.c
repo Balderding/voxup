@@ -2129,6 +2129,12 @@ static void settings_panel(struct nk_context *ctx) {
     if (o->method == M_SUPERPIXEL) { s_int(ctx, "Compactness", &o->sp_m, 1, 100, 1); s_int(ctx, "Passes", &o->sp_iter, 1, 30, 1); s_note(ctx, "Superpixels, Gerstner et al. 2012 (pixelated image abstraction)."); }
     if (o->method == M_MAJORITY) s_note(ctx, "Each pixel the commonest colour of its area.");
     if (o->method == M_TWOSTEP) s_note(ctx, "Lanczos to 4 times the size, then the commonest colour twice: 4x to 2x to 1x.");
+    if (o->method == M_GRID) {      /* the last grid found, and how clearly */
+        double gx, gy; int st; char t[200]; shrink_grid_info(&gx, &gy, &st);
+        if (st) snprintf(t, sizeof t, "Finds the model's own pixel grid (last: cells %.1f x %.1f px, fit %s), each cell its commonest colour, then into the sprite.", gx, gy, st == 3 ? "clear" : st == 2 ? "good" : "weak");
+        else snprintf(t, sizeof t, "Finds the model's own pixel grid, each cell its commonest colour, then into the sprite. Last drawing: no clear grid, so Majority was used.");
+        s_note(ctx, t);
+    }
     s_check(ctx, "In linear light", &o->linear);
     s_check(ctx, "Shape decided on its own", &o->silhouette);
     if (o->silhouette) s_note(ctx, "Half-covered pixels kept, and thin lines (covered more than both neighbours).");

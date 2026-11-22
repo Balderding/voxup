@@ -20,7 +20,7 @@ enum { SZ_16, SZ_32, SZ_CUSTOM };
 enum { FIT_BOX, FIT_FILL, FIT_STRETCH };
 enum { SM_NONE, SM_MEDIAN, SM_BILATERAL };
 enum { M_LANCZOS, M_NEAREST, M_BOX, M_BILINEAR, M_BICUBIC, M_MITCHELL, M_GAUSS, M_MEDIAN, M_MAJORITY, M_DPID, M_SAID, M_SUPERPIXEL,
-       M_TWOSTEP, M_COUNT };
+       M_TWOSTEP, M_GRID, M_COUNT };
 enum { C_ORIGINAL, C_SHADES, C_OWN, C_ASDRAWN, C_KMEANS, C_MEDIANCUT };
 enum { D_RGB, D_LAB, D_REDMEAN };
 enum { DI_NONE, DI_FLOYD, DI_ATKINSON, DI_BAYER };
@@ -67,3 +67,6 @@ int shrink_get(const ShrinkOpt *o, const char *key, int *value);
 int orig_outlined(const unsigned char *rgba, int w, int h);              /* black fences the colours in */
 extern const char *const SHRINK_KEYS[];                                  /* every setting's name, NULL-ended */
 extern const char *const METHOD_NAMES[M_COUNT];
+/* the last grid snap (M_GRID): the drawing's own pixel cell found, x and y, in its pixels, and how clearly (1 to 3;
+   0 = no grid found, Majority was used) */
+void shrink_grid_info(double *cell_x, double *cell_y, int *stars);

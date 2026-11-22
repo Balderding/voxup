@@ -31,7 +31,7 @@
 
 const char *const METHOD_NAMES[M_COUNT] = { "Lanczos", "Nearest", "Box (area)", "Bilinear", "Bicubic", "Mitchell", "Gaussian",
                                             "Median", "Majority", "DPID (2016)", "SAID (2025)", "Superpixels (2012)",
-                                            "2-step (4x, 2x, 1x majority)" };
+                                            "2-step (4x, 2x, 1x majority)", "Grid snap (the model's own pixels)" };
 
 void shrink_defaults(ShrinkOpt *o) {
     memset(o, 0, sizeof *o);
@@ -274,10 +274,12 @@ static void straight(float *const pl[4], size_t k, double *c) { double a = pl[3]
 /* majority (review A7): each pixel votes for the original's colour it is nearest to (weighted RGB), pixels near the
    cell's centre a little more (1 to 2); the cell takes the mean of the winning colour's pixels. With no palette, the
    commonest of 32 levels a channel, as before. pal: np RGB triples */
-static void m_cells(float *const pl[4], int cw, int ch, int w, int h, int method, float *rs[4], const unsigned char *pal, int np) {
-    Span *sx = spans(cw, w), *sy = spans(ch, h); int x, y, u, v, j;
-    float *buf = xm(sizeof(float) * 3 * (size_t)(sx[0].x1 - sx[0].x0 + 2) * (size_t)(cw / w + 3) * (size_t)(ch / h + 3));
-    unsigned *keys = xm(sizeof(unsigned) * (size_t)(cw / w + 3) * (size_t)(ch / h + 3));
+static void m_cells_sp(float *const pl[4], int cw, int ch, int w, int h, int method, float *rs[4], const unsigned char *pal, int np, Span *sx, Span *sy) {
+    int x, y, u, v, j, mw = 1, mh = 1; (void)ch;
+    float *buf; unsigned *keys;
+    for (x = 0; x < w; x++) if (sx[x].x1 - sx[x].x0 > mw) mw = sx[x].x1 - sx[x].x0;
+    for (y = 0; y < h; y++) if (sy[y].x1 - sy[y].x0 > mh) mh = sy[y].x1 - sy[y].x0;
+    buf = xm(sizeof(float) * 3 * (size_t)mw * mh); keys = xm(sizeof(unsigned) * (size_t)mw * mh);
     for (y = 0; y < h; y++) for (x = 0; x < w; x++) {
         size_t o = (size_t)y * w + x; double asum = 0; int n = 0, cnt = 0;
         for (v = sy[y].x0; v < sy[y].x1; v++) for (u = sx[x].x0; u < sx[x].x1; u++) {
@@ -321,7 +323,81 @@ static void m_cells(float *const pl[4], int cw, int ch, int w, int h, int method
             for (j = 0; j < 3; j++) rs[j][o] = (float)(m[j] / bc * rs[3][o] / 255.0);
         }
     }
-    free(buf); free(keys); free(sx); free(sy);
+    free(buf); free(keys);
+}
+static void m_cells(float *const pl[4], int cw, int ch, int w, int h, int method, float *rs[4], const unsigned char *pal, int np) {
+    Span *sx = spans(cw, w), *sy = spans(ch, h);
+    m_cells_sp(pl, cw, ch, w, h, method, rs, pal, np, sx, sy);
+    free(sx); free(sy);
+}
+
+/* grid snap (B6, 2026-11-22; the idea of unfake.js / proper-pixel-art, written here from their descriptions): a model
+   that draws "pixel art" draws it with soft cells of its own (often a fraction of a pixel wide: 1024 / 128 = 8, or
+   10.24). The cell size and where the grid starts are found from the edges: the colour and cover changes summed down
+   each column (across each row), and the step and offset whose lines fall on the most change win. Each cell then takes
+   its commonest colour, from its middle only (the soft seams left out), and the clean cells vote into the sprite's
+   pixels as Majority does. No grid clear enough (its lines less than 1.6 times the average change): Majority. */
+static double G_CX, G_CY, G_SCORE, GRID_LAST_SCORE; static int G_STARS;
+void shrink_grid_info(double *cx, double *cy, int *st) { if (cx) *cx = G_CX; if (cy) *cy = G_CY; if (st) *st = G_STARS; }
+static double grid_find(const double *prof, int n, double s_max, double *best_off) {   /* returns the step (0: none), *best_off */
+    double mean = 0, best = 0, bs = 0, bo = 0, s, o; int i;
+    struct { double s, o, sc; } cand[512]; int nc = 0;
+    for (i = 1; i < n; i++) mean += prof[i];
+    mean /= n > 1 ? n - 1 : 1;
+    if (mean <= 0) return 0;
+    for (s = 3.0; s <= s_max && nc < 512; s += 0.05) {
+        double bsc = 0, bof = 0;
+        for (o = 0; o < s; o += 0.25) {
+            double sum = 0; int k = 0; double x;
+            for (x = o; x < n; x += s) { int u = (int)(x + 0.5); if (u >= 1 && u < n) { sum += prof[u]; k++; } }
+            if (k >= 4 && sum / k > bsc) { bsc = sum / k; bof = o; }
+        }
+        cand[nc].s = s; cand[nc].o = bof; cand[nc].sc = bsc / mean; if (cand[nc].sc > best) best = cand[nc].sc; nc++;
+    }
+    for (i = 0; i < nc; i++) if (cand[i].sc >= best * 0.92) { bs = cand[i].s; bo = cand[i].o; break; }   /* the smallest step nearly as good (its multiples score as well) */
+    if (GRID_LAST_SCORE == 0 || best < GRID_LAST_SCORE) GRID_LAST_SCORE = best;      /* the weaker axis decides */
+    *best_off = bo;
+    return best >= 1.6 ? bs : -best;
+}
+static Span *grid_spans(int n, double step, double off, int *count) {     /* each cell's middle: 20% left off each side */
+    Span *sp = xm(sizeof(Span) * (size_t)(n / step + 4)); int k = 0; double a = off - step;
+    for (; a < n; a += step) {
+        double b = a + step, lo = a < 0 ? 0 : a, hi = b > n ? n : b;
+        if (hi - lo < step * 0.45) continue;                                   /* a sliver at the edge */
+        sp[k].x0 = (int)ceil(lo + step * 0.2); sp[k].x1 = (int)floor(hi - step * 0.2);
+        if (sp[k].x1 <= sp[k].x0) { sp[k].x0 = (int)lo; sp[k].x1 = (int)lo + 1; }
+        if (sp[k].x1 > n) sp[k].x1 = n; if (sp[k].x0 >= n) sp[k].x0 = n - 1;
+        k++;
+    }
+    *count = k; return sp;
+}
+static void m_grid(float *const pl[4], int cw, int ch, int w, int h, float *rs[4], const unsigned char *pal, int np) {
+    double *px = calloc((size_t)cw, sizeof(double)), *py = calloc((size_t)ch, sizeof(double)), ox = 0, oy = 0, sx, sy; int x, y, j;
+    GRID_LAST_SCORE = 0;
+    for (y = 0; y < ch; y++) for (x = 0; x < cw; x++) {
+        size_t k = (size_t)y * cw + x; double d;
+        if (x) { d = fabs(pl[3][k] - pl[3][k - 1]); for (j = 0; j < 3; j++) d += fabs(pl[j][k] - pl[j][k - 1]); px[x] += d; }
+        if (y) { d = fabs(pl[3][k] - pl[3][k - cw]); for (j = 0; j < 3; j++) d += fabs(pl[j][k] - pl[j][k - cw]); py[y] += d; }
+    }
+    sx = grid_find(px, cw, (double)cw / w * 1.5 > 3.5 ? (double)cw / w * 1.5 : 3.5, &ox);
+    sy = grid_find(py, ch, (double)ch / h * 1.5 > 3.5 ? (double)ch / h * 1.5 : 3.5, &oy);
+    G_SCORE = GRID_LAST_SCORE;
+    free(px); free(py);
+    if (sx <= 0 || sy <= 0) {            /* no grid: Majority */
+        G_CX = G_CY = 0; G_STARS = 0;
+        vlog(VLOG_INFO, "shrink", "grid snap: no clear grid (best %.2f / %.2f times the average edge): Majority", -sx, -sy);
+        m_cells(pl, cw, ch, w, h, M_MAJORITY, rs, pal, np); return;
+    }
+    {   int nx, ny, c; Span *gx = grid_spans(cw, sx, ox, &nx), *gy = grid_spans(ch, sy, oy, &ny); float *cl[4];
+        for (c = 0; c < 4; c++) cl[c] = xm(sizeof(float) * (size_t)nx * ny);
+        m_cells_sp(pl, cw, ch, nx, ny, M_MAJORITY, cl, pal, np, gx, gy);     /* each cell: its commonest colour */
+        m_cells(cl, nx, ny, w, h, M_MAJORITY, rs, pal, np);                  /* the clean cells: into the sprite */
+        for (c = 0; c < 4; c++) free(cl[c]);
+        free(gx); free(gy);
+        G_CX = sx; G_CY = sy;
+        G_STARS = G_SCORE >= 3.0 ? 3 : G_SCORE >= 2.2 ? 2 : 1;      /* 1 to 3: how far the grid's lines stand out */
+        vlog(VLOG_INFO, "shrink", "grid snap: cells %.2f x %.2f px (offset %.2f, %.2f), %d x %d cells into %d x %d, lines %.2f times the average edge (%d of 3)", sx, sy, ox, oy, nx, ny, w, h, G_SCORE, G_STARS);
+    }
 }
 /* DPID (Weber 2016): weights (|I(q) - G(p)| / Vmax) ^ lambda over the sprite pixel's area, G the area means smoothed
    by [1 2 1] x [1 2 1] / 16; alpha weighs in too */
@@ -590,6 +666,7 @@ int shrink(const unsigned char *drw, int dw, int dh, const unsigned char *orig, 
             if (o->method == M_DPID) m_dpid(pl, cw, chh, w, h, o->dpid_lambda / 100.0, rs);
             else if (o->method == M_SAID) m_said(pl, cw, chh, w, h, o, rs);
             else if (o->method == M_SUPERPIXEL) m_superpixel(pl, cw, chh, w, h, o, rs);
+            else if (o->method == M_GRID) m_grid(pl, cw, chh, w, h, rs, pal, npal);
             else m_cells(pl, cw, chh, w, h, o->method, rs, pal, npal);
         }
         for (c = 0; c < 4; c++) free(pl[c]);
