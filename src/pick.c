@@ -624,6 +624,7 @@ static struct {
     int want[2], split[2], drag, drag_w, cur_we, per; float drag_x; int inl, ing, inr;
     int empty; char empty_msg[400];             /* no sprites yet: the window asks for the folder (one exe) */
     int lic_ask, need_token; char tok[256];     /* Get waits for the licence click (model + 1); a Hugging Face token asked for (never saved in a file or log) */
+    float ui;                                   /* the window's scale: its monitor's DPI / 96 (B9) */
     unsigned folds; int keys_open; int fold[2];   /* ...; a side panel folded to a strip (0 left, 1 right; pick.ini fold=) */              /* Settings sections folded (bit per section); the key list shown */
     unsigned prob_gone[32]; int nprob_gone; float prob_gap; struct nk_rect prob_rect;   /* Problem texts clicked away (not shown again); the room it kept */
 } S;
@@ -2808,8 +2809,13 @@ static LRESULT CALLBACK wndproc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
     if (m == WM_DESTROY) { S.wp.length = sizeof S.wp; S.have_wp = GetWindowPlacement(w, &S.wp) != 0; PostQuitMessage(0); return 0; }
     if (m == WM_APP) return 0;
     if (m == WM_SETCURSOR && LOWORD(lp) == HTCLIENT && (S.cur_we || S.drag)) { SetCursor(LoadCursor(NULL, IDC_SIZEWE)); return TRUE; }   /* over a divider */
+    if (m == WM_DPICHANGED) {     /* moved to a monitor of another scale (B9) */
+        RECT *r = (RECT *)lp; S.ui = HIWORD(wp) / 96.0f; nk_gdi_set_scale(S.ui);
+        vlog(VLOG_INFO, "dpi", "the window's scale: %.2f (%u DPI)", S.ui, (unsigned)HIWORD(wp));
+        SetWindowPos(w, NULL, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE); return 0;
+    }
     if (m == WM_GETMINMAXINFO) {   /* never smaller than the three panels at their least (Draw, Keep and the original stay in sight) */
-        RECT r = { 0, 0, WIN_MIN_W, WIN_MIN_H }; MINMAXINFO *mi = (MINMAXINFO *)lp;
+        RECT r = { 0, 0, (LONG)(WIN_MIN_W * (S.ui > 0 ? S.ui : 1)), (LONG)(WIN_MIN_H * (S.ui > 0 ? S.ui : 1)) }; MINMAXINFO *mi = (MINMAXINFO *)lp;
         AdjustWindowRectEx(&r, WS_OVERLAPPEDWINDOW, FALSE, WS_EX_APPWINDOW);
         mi->ptMinTrackSize.x = r.right - r.left; mi->ptMinTrackSize.y = r.bottom - r.top; return 0;
     }
@@ -2826,7 +2832,7 @@ static LRESULT CALLBACK wndproc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
     if (nk_gdi_handle_event(w, m, wp, lp)) return 0;
     return DefWindowProcW(w, m, wp, lp);
 }
-static void save_bmp(const char *path, int W, int H) {
+static void save_bmp(const char *path, int W, int H) {      /* the window's real pixels (scaled, B9) */
     BITMAPINFO bi; BITMAPFILEHEADER fh; int row = (W * 3 + 3) & ~3; unsigned char *px = xmalloc((size_t)row * H); FILE *f;
     memset(&bi, 0, sizeof bi); bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER); bi.bmiHeader.biWidth = W; bi.bmiHeader.biHeight = H;
     bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 24; bi.bmiHeader.biCompression = BI_RGB;
@@ -2983,9 +2989,18 @@ static void empty_frame(struct nk_context *ctx, int W, int H) {   /* no sprites 
     nk_layout_space_end(ctx);
     nk_end(ctx);
 }
+/* per-monitor DPI v2 (Windows 10 1703+; looked up, so an older Windows simply runs unscaled) (B9) */
+static void dpi_aware(void) {
+    typedef BOOL (WINAPI *SetCtx)(HANDLE); HMODULE u = GetModuleHandleA("user32.dll"); SetCtx f = u ? (SetCtx)(void *)GetProcAddress(u, "SetProcessDpiAwarenessContext") : NULL;
+    if (f && !f((HANDLE)(INT_PTR)-4)) vlog(VLOG_INFO, "dpi", "per-monitor DPI v2 not set: %s", vlog_errno());
+}
+static float dpi_of(HWND w) {
+    typedef UINT (WINAPI *GetDpi)(HWND); HMODULE u = GetModuleHandleA("user32.dll"); GetDpi f = u ? (GetDpi)(void *)GetProcAddress(u, "GetDpiForWindow") : NULL;
+    UINT d = f && w ? f(w) : 96; return d ? d / 96.0f : 1.0f;
+}
 static int gui(int argc, char **argv) {
     const char *shot = NULL, *test_get = NULL; char *draws[2 * MAXM]; int ndraw = 0, drawn = 0; char *sets[64]; int nsets = 0;
-    int test_accept = 0, test_contrast = 0; const char *test_fold = NULL; const char *test_from = NULL, *test_split = NULL; int TEV[48][4], ntev = 0, kev = 0;
+    int test_accept = 0, test_contrast = 0, test_dpi = 0; const char *test_fold = NULL; const char *test_from = NULL, *test_split = NULL; int TEV[48][4], ntev = 0, kev = 0;
     int test_keep = 0, test_undo = 0, test_tab = -1, test_item = -1, test_redraw = -1, test_keys[8], ntest_keys = 0, test_clk[8][3], ntest_clk = 0; const char *test_find = NULL; int i, k, W = 1440, H = 940, running = 1, refresh = 1, frames = 0;
     WNDCLASSW wc; RECT rc; DWORD style = WS_OVERLAPPEDWINDOW; HDC dc; GdiFont *font; struct nk_context *ctx; char p[MAX_PATH], *t;
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION jl;
@@ -3007,6 +3022,7 @@ static int gui(int argc, char **argv) {
             else if (!strcmp(argv[i], "--novulkan")) TEST_NOVK = 1;      /* acts as if vulkan-1.dll were missing */
 #endif
             else if (!strcmp(argv[i], "--contrast")) test_contrast = 1;
+            else if (!strcmp(argv[i], "--dpi") && i + 1 < argc) test_dpi = atoi(argv[++i]);     /* the window drawn as on a monitor of that DPI (96, 144, 192) */
             else if (!strcmp(argv[i], "--fold") && i + 1 < argc) test_fold = argv[++i];   /* L,R: 1 folds that side (over pick.ini's) */     /* each text colour against its ground, in the log */
             else if (!strcmp(argv[i], "--accept-licence")) test_accept = 1;     /* Accept and get, when the licence is asked */
             else if (!strcmp(argv[i], "--pick-folder") && i + 1 < argc) TEST_PICK = argv[++i];    /* the folder picker's answer, Choose pressed */
@@ -3070,7 +3086,9 @@ static int gui(int argc, char **argv) {
     wc.style = CS_DBLCLKS; wc.lpfnWndProc = wndproc; wc.hInstance = GetModuleHandleW(0);
     wc.hIcon = LoadIcon(NULL, IDI_APPLICATION); wc.hCursor = LoadCursor(NULL, IDC_ARROW); wc.lpszClassName = L"voxupWindow";
     RegisterClassW(&wc);
-    rc.left = 0; rc.top = 0; rc.right = W; rc.bottom = H; AdjustWindowRectEx(&rc, style, FALSE, WS_EX_APPWINDOW);
+    if (!shot) dpi_aware();
+    S.ui = shot ? (test_dpi > 0 ? test_dpi / 96.0f : 1.0f) : 1.0f;
+    rc.left = 0; rc.top = 0; rc.right = (LONG)(W * S.ui); rc.bottom = (LONG)(H * S.ui); AdjustWindowRectEx(&rc, style, FALSE, WS_EX_APPWINDOW);
     /* the self-test window is never shown: it is drawn into its own surface and written to a file */
     S.wnd = CreateWindowExW(shot ? WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE : WS_EX_APPWINDOW, wc.lpszClassName, L"voxup: draw 20, keep the best",
                             style | (shot ? 0 : WS_VISIBLE), shot ? -4000 : CW_USEDEFAULT, shot ? -4000 : CW_USEDEFAULT,
@@ -3078,9 +3096,16 @@ static int gui(int argc, char **argv) {
     if (!S.wnd) { vlog(VLOG_ERR, "pick", "could not make the window: %s", vlog_errno()); return 1; }
     if (!shot && S.have_wp == 2) {        /* where it was last time (pick.ini window=), if that is still on a screen */
         RECT r = S.wp.rcNormalPosition; if (MonitorFromRect(&r, MONITOR_DEFAULTTONULL)) SetWindowPlacement(S.wnd, &S.wp); }
+    if (!shot) {     /* the monitor it opened on: its scale, and the window that big */
+        S.ui = dpi_of(S.wnd);
+        if (S.ui != 1.0f && S.have_wp != 2) { RECT r = { 0, 0, (LONG)(W * S.ui), (LONG)(H * S.ui) }; AdjustWindowRectEx(&r, style, FALSE, WS_EX_APPWINDOW);
+            SetWindowPos(S.wnd, NULL, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE); }
+    }
+    nk_gdi_set_scale(S.ui);
+    vlog(VLOG_INFO, "dpi", "the window's scale: %.2f (%d DPI)", S.ui, (int)(S.ui * 96 + 0.5f));
     dc = GetDC(S.wnd);
     font = nk_gdifont_create("Segoe UI", 16);
-    ctx = nk_gdi_init(font, dc, (unsigned)W, (unsigned)H);
+    ctx = nk_gdi_init(font, dc, (unsigned)(W * S.ui), (unsigned)(H * S.ui));
     if (shot) {   /* a self-test never keeps into the real game folders (a test click or key can keep too) */
         static char g0[MAX_PATH], g1[MAX_PATH];
         snprintf(g0, sizeof g0, "%s\\selftest-game\\data", WORK); snprintf(g1, sizeof g1, "%s\\selftest-game\\dist", WORK);
@@ -3109,6 +3134,7 @@ static int gui(int argc, char **argv) {
         nk_input_end(ctx);
         GetClientRect(S.wnd, &rc);
         if (shot) { rc.right = W; rc.bottom = H; }
+        else { rc.right = (LONG)(rc.right / S.ui); rc.bottom = (LONG)(rc.bottom / S.ui); }     /* logical pixels (B9) */
         if (S.empty) empty_frame(ctx, rc.right > 200 ? rc.right : W, rc.bottom > 200 ? rc.bottom : H);
         else gui_frame(ctx, rc.right > 200 ? rc.right : W, rc.bottom > 200 ? rc.bottom : H);
         opt_check();      /* a changed setting: a new generation, the shown round made again in the background */
@@ -3140,8 +3166,8 @@ static int gui(int argc, char **argv) {
                 snprintf(g0, sizeof g0, "%s\\selftest-game\\data", WORK); snprintf(g1, sizeof g1, "%s\\selftest-game\\dist", WORK);
                 GAMEDIRS[0] = g0; GAMEDIRS[1] = g1; N_GAME = 2; snprintf(GAMETAG[0], 16, "data"); snprintf(GAMETAG[1], 16, "dist"); keep(); test_keep--; continue;
             }
-            if (frames > 6 && S.empty) { save_bmp(shot, W, H); vlog(VLOG_INFO, "selftest", "wrote %s (the empty start)", shot); break; }
-            if (frames > 6) { save_bmp(shot, W, H); vlog(VLOG_INFO, "selftest", "wrote %s (%d x %d, panels %d | grid %d columns | %d%s%s)", shot, W, H, S.split[0], S.per, S.split[1], S.fold[0] ? ", left folded" : "", S.fold[1] ? ", right folded" : ""); break; }
+            if (frames > 6 && S.empty) { save_bmp(shot, (int)(W * S.ui), (int)(H * S.ui)); vlog(VLOG_INFO, "selftest", "wrote %s (the empty start)", shot); break; }
+            if (frames > 6) { save_bmp(shot, (int)(W * S.ui), (int)(H * S.ui)); vlog(VLOG_INFO, "selftest", "wrote %s (%d x %d, panels %d | grid %d columns | %d%s%s)", shot, W, H, S.split[0], S.per, S.split[1], S.fold[0] ? ", left folded" : "", S.fold[1] ? ", right folded" : ""); break; }
         }
     }
     if (S.busy) { InterlockedExchange(&S.stop, 1); for (i = 0; i < 100 && S.busy; i++) Sleep(100); }

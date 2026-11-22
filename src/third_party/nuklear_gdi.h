@@ -21,6 +21,7 @@ typedef struct GdiFont GdiFont;
 NK_API struct nk_context* nk_gdi_init(GdiFont *font, HDC window_dc, unsigned int width, unsigned int height);
 NK_API int nk_gdi_handle_event(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
 NK_API void nk_gdi_render(struct nk_color clear);
+NK_API void nk_gdi_set_scale(float s);     /* voxup: the window's DPI scale (2026-11-22) */
 NK_API void nk_gdi_shutdown(void);
 
 /* font */
@@ -544,6 +545,15 @@ nk_gdi_clear(HDC dc, struct nk_color col)
     ExtTextOutW(dc, 0, 0, ETO_OPAQUE, &rect, NULL, 0, NULL);
 }
 
+/* voxup: the window's scale (its monitor's DPI / 96, per-monitor DPI v2). Nuklear works in logical pixels; the memory
+   bitmap is the window's real size and every drawing call goes through a world transform, so text is drawn by Windows at
+   the real size (crisp) and pictures are stretched nearest-neighbour (COLORONCOLOR: pixel art stays sharp). Mouse
+   positions are divided back. 2026-11-22 */
+static float nk_gdi_ui = 1.0f;
+NK_API void nk_gdi_set_scale(float s) { nk_gdi_ui = s > 0.25f ? s : 1.0f; }
+#define NK_GDI_X(l) ((short)((float)(short)LOWORD(l) / nk_gdi_ui))
+#define NK_GDI_Y(l) ((short)((float)(short)HIWORD(l) / nk_gdi_ui))
+
 static void
 nk_gdi_blit(HDC dc)
 {
@@ -909,43 +919,43 @@ nk_gdi_handle_event(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam)
         break;
 
     case WM_LBUTTONDOWN:
-        nk_input_button(&gdi.ctx, NK_BUTTON_LEFT, (short)LOWORD(lparam), (short)HIWORD(lparam), 1);
+        nk_input_button(&gdi.ctx, NK_BUTTON_LEFT, NK_GDI_X(lparam), NK_GDI_Y(lparam), 1);
         SetCapture(wnd);
         return 1;
 
     case WM_LBUTTONUP:
-        nk_input_button(&gdi.ctx, NK_BUTTON_DOUBLE, (short)LOWORD(lparam), (short)HIWORD(lparam), 0);
-        nk_input_button(&gdi.ctx, NK_BUTTON_LEFT, (short)LOWORD(lparam), (short)HIWORD(lparam), 0);
+        nk_input_button(&gdi.ctx, NK_BUTTON_DOUBLE, NK_GDI_X(lparam), NK_GDI_Y(lparam), 0);
+        nk_input_button(&gdi.ctx, NK_BUTTON_LEFT, NK_GDI_X(lparam), NK_GDI_Y(lparam), 0);
         ReleaseCapture();
         return 1;
 
     case WM_RBUTTONDOWN:
-        nk_input_button(&gdi.ctx, NK_BUTTON_RIGHT, (short)LOWORD(lparam), (short)HIWORD(lparam), 1);
+        nk_input_button(&gdi.ctx, NK_BUTTON_RIGHT, NK_GDI_X(lparam), NK_GDI_Y(lparam), 1);
         SetCapture(wnd);
         return 1;
 
     case WM_RBUTTONUP:
-        nk_input_button(&gdi.ctx, NK_BUTTON_RIGHT, (short)LOWORD(lparam), (short)HIWORD(lparam), 0);
+        nk_input_button(&gdi.ctx, NK_BUTTON_RIGHT, NK_GDI_X(lparam), NK_GDI_Y(lparam), 0);
         ReleaseCapture();
         return 1;
 
     case WM_MBUTTONDOWN:
-        nk_input_button(&gdi.ctx, NK_BUTTON_MIDDLE, (short)LOWORD(lparam), (short)HIWORD(lparam), 1);
+        nk_input_button(&gdi.ctx, NK_BUTTON_MIDDLE, NK_GDI_X(lparam), NK_GDI_Y(lparam), 1);
         SetCapture(wnd);
         return 1;
 
     case WM_MBUTTONUP:
-        nk_input_button(&gdi.ctx, NK_BUTTON_MIDDLE, (short)LOWORD(lparam), (short)HIWORD(lparam), 0);
+        nk_input_button(&gdi.ctx, NK_BUTTON_MIDDLE, NK_GDI_X(lparam), NK_GDI_Y(lparam), 0);
         ReleaseCapture();
         return 1;
 
     case WM_XBUTTONDOWN:
         switch (GET_XBUTTON_WPARAM(wparam)) {
         case XBUTTON1:
-            nk_input_button(&gdi.ctx, NK_BUTTON_X1, (short)LOWORD(lparam), (short)HIWORD(lparam), 1);
+            nk_input_button(&gdi.ctx, NK_BUTTON_X1, NK_GDI_X(lparam), NK_GDI_Y(lparam), 1);
             break;
         case XBUTTON2:
-            nk_input_button(&gdi.ctx, NK_BUTTON_X2, (short)LOWORD(lparam), (short)HIWORD(lparam), 1);
+            nk_input_button(&gdi.ctx, NK_BUTTON_X2, NK_GDI_X(lparam), NK_GDI_Y(lparam), 1);
             break;
         }
         SetCapture(wnd);
@@ -954,10 +964,10 @@ nk_gdi_handle_event(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam)
     case WM_XBUTTONUP:
         switch (GET_XBUTTON_WPARAM(wparam)) {
         case XBUTTON1:
-            nk_input_button(&gdi.ctx, NK_BUTTON_X1, (short)LOWORD(lparam), (short)HIWORD(lparam), 0);
+            nk_input_button(&gdi.ctx, NK_BUTTON_X1, NK_GDI_X(lparam), NK_GDI_Y(lparam), 0);
             break;
         case XBUTTON2:
-            nk_input_button(&gdi.ctx, NK_BUTTON_X2, (short)LOWORD(lparam), (short)HIWORD(lparam), 0);
+            nk_input_button(&gdi.ctx, NK_BUTTON_X2, NK_GDI_X(lparam), NK_GDI_Y(lparam), 0);
             break;
         }
         ReleaseCapture();
@@ -968,11 +978,11 @@ nk_gdi_handle_event(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam)
         return 1;
 
     case WM_MOUSEMOVE:
-        nk_input_motion(&gdi.ctx, (short)LOWORD(lparam), (short)HIWORD(lparam));
+        nk_input_motion(&gdi.ctx, NK_GDI_X(lparam), NK_GDI_Y(lparam));
         return 1;
 
     case WM_LBUTTONDBLCLK:
-        nk_input_button(&gdi.ctx, NK_BUTTON_DOUBLE, (short)LOWORD(lparam), (short)HIWORD(lparam), 1);
+        nk_input_button(&gdi.ctx, NK_BUTTON_DOUBLE, NK_GDI_X(lparam), NK_GDI_Y(lparam), 1);
         return 1;
     }
 
@@ -996,6 +1006,10 @@ nk_gdi_render(struct nk_color clear)
     SelectObject(memory_dc, GetStockObject(DC_PEN));
     SelectObject(memory_dc, GetStockObject(DC_BRUSH));
     nk_gdi_clear(memory_dc, clear);
+    {   /* voxup: the scale, for the drawing below */
+        XFORM xf = { 1, 0, 0, 1, 0, 0 }; xf.eM11 = xf.eM22 = nk_gdi_ui;
+        SetGraphicsMode(memory_dc, GM_ADVANCED); SetWorldTransform(memory_dc, &xf); SetStretchBltMode(memory_dc, COLORONCOLOR);
+    }
 
     nk_foreach(cmd, &gdi.ctx)
     {
@@ -1082,6 +1096,7 @@ nk_gdi_render(struct nk_color clear)
         default: break;
         }
     }
+    ModifyWorldTransform(memory_dc, NULL, MWT_IDENTITY); SelectClipRgn(memory_dc, NULL);     /* voxup: back to 1:1 */
     nk_gdi_blit(gdi.window_dc);
     nk_clear(&gdi.ctx);
 }
