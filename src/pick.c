@@ -526,7 +526,7 @@ static struct {
     int want[2], split[2], drag, drag_w, cur_we, per; float drag_x; int inl, ing, inr;
     int empty; char empty_msg[400];             /* no sprites yet: the window asks for the folder (one exe) */
     int lic_ask, need_token; char tok[256];     /* Get waits for the licence click (model + 1); a Hugging Face token asked for (never saved in a file or log) */
-    unsigned folds; int keys_open;              /* Settings sections folded (bit per section); the key list shown */
+    unsigned folds; int keys_open; int fold[2];   /* ...; a side panel folded to a strip (0 left, 1 right; pick.ini fold=) */              /* Settings sections folded (bit per section); the key list shown */
     unsigned prob_gone[32]; int nprob_gone; float prob_gap; struct nk_rect prob_rect;   /* Problem texts clicked away (not shown again); the room it kept */
 } S;
 /* drawn inside voxup: the built-in engine is in this voxup, the model has its lines, and the engine is chosen (or the
@@ -1758,7 +1758,8 @@ static void move_sel(int dx, int dy) {
     if (k >= R->n) k = R->n - 1;
     S.sel = k; if (S.tab == 1) S.tab = 0;
 }
-static void set_tab(int t) { S.tab = t; }
+static void fold_set(int side, int f);
+static void set_tab(int t) { S.tab = t; if (S.fold[1]) fold_set(1, 0); }
 static int hotkey(int vk) {
     int ctrl = GetKeyState(VK_CONTROL) < 0, busy = S.busy != 0;
     switch (vk) {
@@ -1780,6 +1781,8 @@ static int hotkey(int vk) {
     case VK_HOME: case VK_OEM_COMMA: if (S.cur > 0) { S.cur--; S.sel = -1; kick_reshape(); } return 1;
     case VK_END: case VK_OEM_PERIOD: if (S.cur < S.nr - 1) { S.cur++; S.sel = -1; kick_reshape(); } return 1;
     case 'F': if (ctrl) { S.find_focus = 1; return 1; } return 0;
+    case VK_OEM_4: if (ctrl) { fold_set(0, !S.fold[0]); return 1; } return 0;      /* Ctrl+[ : the left panel folded / open */
+    case VK_OEM_6: if (ctrl) { fold_set(1, !S.fold[1]); return 1; } return 0;      /* Ctrl+] : the right panel */
     case VK_OEM_2: S.find_focus = 1; return 1;                     /* the / key */
     case 'Q': queue_toggle(S.item); return 1;
     case 'R': if (!busy && S.nq) { S.qrun = 1; status("Running the queue: a round for each of %d item(s).", S.nq); } return 1;
@@ -2169,19 +2172,41 @@ static void compare_panel(struct nk_context *ctx, Shot *s) {
 /* the lines between the panels (2026-11-22): drag one to make the panels beside it wider or narrower, double-click it
    for its standard place; the widths are kept in pick.ini (split=) and the grid takes what is left */
 static void settings(int save);
-enum { SPLIT_W = 12, LEFT_MIN = 290, RIGHT_MIN = 290, GRID_MIN = 160, LEFT_DEF = 330, RIGHT_DEF = 330, WIN_MIN_W = 900, WIN_MIN_H = 600 };
+enum { STRIP_W = 30, SPLIT_W = 12, LEFT_MIN = 290, RIGHT_MIN = 290, GRID_MIN = 160, LEFT_DEF = 330, RIGHT_DEF = 330, WIN_MIN_W = 900, WIN_MIN_H = 600 };
 static void split_fit(int avail, int *gw) {     /* the wanted widths fitted into the window: the sides give way, never below their least */
     int l = S.want[0] < LEFT_MIN ? LEFT_MIN : S.want[0], r = S.want[1] < RIGHT_MIN ? RIGHT_MIN : S.want[1], room = avail - GRID_MIN;
-    if (l + r > room) {
+    if (S.fold[0]) l = STRIP_W;
+    if (S.fold[1]) r = STRIP_W;
+    if (l + r > room && !S.fold[0] && !S.fold[1]) {
         int over = l + r - room, el = l - LEFT_MIN, er = r - RIGHT_MIN, dl;
         if (el + er > 0) { dl = el + er > over ? over * el / (el + er) : el; l -= dl; r -= el + er > over ? over - dl : er; }
     }
+    else if (l + r > room) { if (!S.fold[0]) l = room - r < LEFT_MIN ? LEFT_MIN : room - r; if (!S.fold[1]) r = room - l < RIGHT_MIN ? RIGHT_MIN : room - l; }
     S.split[0] = l; S.split[1] = r; *gw = avail - l - r; if (*gw < 40) *gw = 40;
 }
+static void fold_set(int side, int f) {
+    if (S.fold[side] == f) return;
+    S.fold[side] = f; S.drag = 0;
+    status(f ? "%s panel folded (%s or a click on its strip opens it)." : "%s panel open again.", side ? "The right" : "The left", side ? "Ctrl+]" : "Ctrl+[");
+    settings(1);
+}
+/* a folded side panel: a strip with its name down it; a click anywhere on it opens the panel (B4) */
+static void fold_strip(struct nk_context *ctx, int side) {
+    const char *t = side ? "CHOSEN" : "ITEM"; struct nk_rect b = nk_widget_bounds(ctx);
+    if (nk_group_begin(ctx, side ? "strip-r" : "strip-l", NK_WINDOW_BORDER | NK_WINDOW_NO_SCROLLBAR)) {
+        int i;
+        nk_layout_row_dynamic(ctx, 24, 1); nk_label_colored(ctx, side ? "<" : ">", NK_TEXT_CENTERED, TEALT);
+        for (i = 0; t[i]; i++) { char c[2] = { t[i], 0 }; nk_layout_row_dynamic(ctx, 16, 1); nk_label_colored(ctx, c, NK_TEXT_CENTERED, GOLD); }
+        nk_group_end(ctx);
+    }
+    if (nk_input_is_mouse_hovering_rect(&ctx->input, b)) nk_ext_tooltip(ctx, side ? "Click: open the right panel again (Ctrl+])" : "Click: open the left panel again (Ctrl+[)");
+    if (nk_input_is_mouse_click_down_in_rect(&ctx->input, NK_BUTTON_LEFT, b, nk_true)) fold_set(side, 0);
+}
 static void split_bar(struct nk_context *ctx, int which) {
-    int r = nk_ext_splitter(ctx, S.drag == which, TEAL2, nk_rgb(70, 74, 84), S.drag ? NULL : "Drag: wider or narrower. Double-click: the standard width.");
+    int r = nk_ext_splitter(ctx, S.drag == which, TEAL2, nk_rgb(70, 74, 84), S.drag ? NULL : S.fold[which - 1] ? "Click: open the folded panel" : "Drag: wider or narrower. Double-click: the standard width. Ctrl+[ / Ctrl+]: fold the left / right panel.");
     if ((r & NK_EXT_SPLIT_HOVER) || S.drag == which) S.cur_we = 1;
     if (r & NK_EXT_SPLIT_DOUBLE) { S.want[which - 1] = which == 1 ? LEFT_DEF : RIGHT_DEF; S.drag = 0; status("Panel put back to its standard width."); }
+    else if ((r & NK_EXT_SPLIT_PRESS) && S.fold[which - 1]) fold_set(which - 1, 0);
     else if ((r & NK_EXT_SPLIT_PRESS) && !S.drag) { S.drag = which; S.drag_x = ctx->input.mouse.pos.x; S.drag_w = S.split[which - 1]; S.want[which - 1] = S.drag_w; }
 }
 static int gui_frame(struct nk_context *ctx, int W, int H) {
@@ -2209,10 +2234,13 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
     nk_layout_row_begin(ctx, NK_STATIC, (float)(H - 16), 5);
     /* left: the item */
     nk_layout_row_push(ctx, (float)S.split[0]);
-    if (nk_group_begin(ctx, "item", NK_WINDOW_BORDER)) {
+    if (S.fold[0]) fold_strip(ctx, 0);
+    else if (nk_group_begin(ctx, "item", NK_WINDOW_BORDER)) {
         {   /* Find: the list, < > and PgUp/PgDn keep to the items that fit; Enter goes to the first */
             struct nk_rect bb; nk_flags ef; char old[48]; snprintf(old, sizeof old, "%s", S.find);
-            static const int TW[] = { 40, 0, 64 }; nk_ext_row(ctx, 24, 3, TW);
+            static const int TW[] = { 22, 36, 0, 64 }; nk_ext_row(ctx, 24, 4, TW);
+            bb = nk_widget_bounds(ctx); if (button(ctx, "<", 0, 1)) fold_set(0, 1);
+            if (nk_input_is_mouse_hovering_rect(&ctx->input, bb)) nk_ext_tooltip(ctx, "Fold this panel to a strip (Ctrl+[)");
             nk_label_colored(ctx, "Item", NK_TEXT_LEFT, GOLD);
             bb = nk_widget_bounds(ctx);
             if (S.find_focus) { nk_edit_focus(ctx, NK_EDIT_FIELD | NK_EDIT_SIG_ENTER); S.find_focus = 0; }
@@ -2477,7 +2505,7 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
             if (nk_input_is_mouse_click_down_in_rect(&ctx->input, NK_BUTTON_LEFT, kb, nk_true)) S.keys_open = !S.keys_open;
             if (S.keys_open) {
                 nk_ext_wrap_label(ctx, "Click: look at it   Double-click / Enter: keep   Right-click / Del: draw that one again   Space / Ctrl+Enter: draw   Esc: stop", DIM, S.ing);
-                nk_ext_wrap_label(ctx, "Arrows: choose   PgUp/PgDn: item   Home/End: round   Ctrl+Z: undo keep   Ctrl+F: find   Q / R: queue / run it   1 2 3: panels   F1..: presets", DIM, S.ing);
+                nk_ext_wrap_label(ctx, "Arrows: choose   PgUp/PgDn: item   Home/End: round   Ctrl+Z: undo keep   Ctrl+F: find   Q / R: queue / run it   1 2 3: panels   Ctrl+[ Ctrl+]: fold a side   F1..: presets", DIM, S.ing);
             }
         }
         for (r = 0; R && r * S.per < R->n; r++) {
@@ -2539,12 +2567,15 @@ static int gui_frame(struct nk_context *ctx, int W, int H) {
     nk_layout_row_push(ctx, SPLIT_W); split_bar(ctx, 2);
     /* right: the chosen one, and Keep */
     nk_layout_row_push(ctx, (float)S.split[1]);
-    if (nk_group_begin(ctx, "chosen", NK_WINDOW_BORDER)) {
+    if (S.fold[1]) fold_strip(ctx, 1);
+    else if (nk_group_begin(ctx, "chosen", NK_WINDOW_BORDER)) {
         Shot *s = S.sel >= 0 && S.nr && S.sel < S.r[S.cur].n ? &S.r[S.cur].s[S.sel] : NULL;
-        nk_layout_row_dynamic(ctx, 28, 3);
-        if (button(ctx, "Chosen (1)", S.tab == 0, 1)) S.tab = 0;
-        if (button(ctx, "Settings (2)", S.tab == 1, 1)) S.tab = 1;
-        if (button(ctx, "Compare (3)", S.tab == 2, 1)) S.tab = 2;
+        {   static const int TW[] = { 0, 0, 0, 22 }; struct nk_rect fb; nk_ext_row(ctx, 28, 4, TW);
+            if (button(ctx, "Chosen (1)", S.tab == 0, 1)) S.tab = 0;
+            if (button(ctx, "Settings (2)", S.tab == 1, 1)) S.tab = 1;
+            if (button(ctx, "Compare (3)", S.tab == 2, 1)) S.tab = 2;
+            fb = nk_widget_bounds(ctx); if (button(ctx, ">", 0, 1)) fold_set(1, 1);
+            if (nk_input_is_mouse_hovering_rect(&ctx->input, fb)) nk_ext_tooltip(ctx, "Fold this panel to a strip (Ctrl+])"); }
         if (S.tab == 1) settings_panel(ctx);
         else if (S.tab == 2) compare_panel(ctx, s);
         else {
@@ -2630,7 +2661,7 @@ static void settings(int save) {
         for (m = 0; m < S.nm; m++) { snprintf(l, sizeof l, "n.%s=%d\r\n", S.m[m].id, S.m[m].n); buf_str(&b, l); }
         for (m = 0; m < S.nm; m++) if (S.m[m].sdimage == 2) { snprintf(l, sizeof l, "strength.%s=%d\r\n", S.m[m].id, S.m[m].strength); buf_str(&b, l); }
         for (m = 0; m < S.nm; m++) if (S.m[m].has_lora) { snprintf(l, sizeof l, "lora.%s=%d\r\n", S.m[m].id, S.m[m].lora_w); buf_str(&b, l); }
-        snprintf(l, sizeof l, "engine=%d\r\nsplit=%d,%d\r\nfolds=%u\r\nkeys=%d\r\n", S.engine, S.want[0], S.want[1], S.folds, S.keys_open); buf_str(&b, l);
+        snprintf(l, sizeof l, "engine=%d\r\nsplit=%d,%d\r\nfolds=%u\r\nkeys=%d\r\nfold=%d,%d\r\n", S.engine, S.want[0], S.want[1], S.folds, S.keys_open, S.fold[0], S.fold[1]); buf_str(&b, l);
         write_all(p, b.p, b.n); free(b.p); return;
     }
     for (m = 0; m < S.nm; m++) S.m[m].n = !strcmp(S.m[m].id, "klein") || !strcmp(S.m[m].id, "kontext") ? 10 : 0;
@@ -2650,6 +2681,7 @@ static void settings(int save) {
     if ((q = strstr(t, "\nengine="))) S.engine = atoi(q + 8) == 1;
     if ((q = strstr(t, "\nfolds="))) S.folds = (unsigned)strtoul(q + 7, NULL, 10);
     if ((q = strstr(t, "\nkeys="))) S.keys_open = atoi(q + 6) == 1;
+    if ((q = strstr(t, "\nfold="))) { int a = 0, b2 = 0; if (sscanf(q + 6, "%d,%d", &a, &b2) == 2) { S.fold[0] = a == 1; S.fold[1] = b2 == 1; } }
     if ((q = strstr(t, "\nsplit="))) { int a, b2; if (sscanf(q + 7, "%d,%d", &a, &b2) == 2) {     /* fitted to the least widths (review 2, P3-8) */
         S.want[0] = a < LEFT_MIN ? LEFT_MIN : a > 3999 ? 3999 : a; S.want[1] = b2 < RIGHT_MIN ? RIGHT_MIN : b2 > 3999 ? 3999 : b2; } }
     if ((q = strstr(t, "\nauto_next="))) S.auto_next = atoi(q + 11) == 1;
@@ -2754,7 +2786,7 @@ static void empty_frame(struct nk_context *ctx, int W, int H) {   /* no sprites 
 }
 static int gui(int argc, char **argv) {
     const char *shot = NULL, *test_get = NULL; char *draws[2 * MAXM]; int ndraw = 0, drawn = 0; char *sets[64]; int nsets = 0;
-    int test_accept = 0, test_contrast = 0; const char *test_from = NULL, *test_split = NULL; int TEV[48][4], ntev = 0, kev = 0;
+    int test_accept = 0, test_contrast = 0; const char *test_fold = NULL; const char *test_from = NULL, *test_split = NULL; int TEV[48][4], ntev = 0, kev = 0;
     int test_keep = 0, test_undo = 0, test_tab = -1, test_item = -1, test_redraw = -1, test_keys[8], ntest_keys = 0, test_clk[8][3], ntest_clk = 0; const char *test_find = NULL; int i, k, W = 1440, H = 940, running = 1, refresh = 1, frames = 0;
     WNDCLASSW wc; RECT rc; DWORD style = WS_OVERLAPPEDWINDOW; HDC dc; GdiFont *font; struct nk_context *ctx; char p[MAX_PATH], *t;
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION jl;
@@ -2775,7 +2807,8 @@ static int gui(int argc, char **argv) {
 #if SD_BUILT
             else if (!strcmp(argv[i], "--novulkan")) TEST_NOVK = 1;      /* acts as if vulkan-1.dll were missing */
 #endif
-            else if (!strcmp(argv[i], "--contrast")) test_contrast = 1;     /* each text colour against its ground, in the log */
+            else if (!strcmp(argv[i], "--contrast")) test_contrast = 1;
+            else if (!strcmp(argv[i], "--fold") && i + 1 < argc) test_fold = argv[++i];   /* L,R: 1 folds that side (over pick.ini's) */     /* each text colour against its ground, in the log */
             else if (!strcmp(argv[i], "--accept-licence")) test_accept = 1;     /* Accept and get, when the licence is asked */
             else if (!strcmp(argv[i], "--pick-folder") && i + 1 < argc) TEST_PICK = argv[++i];    /* the folder picker's answer, Choose pressed */
             else if (!strcmp(argv[i], "--split") && i + 1 < argc) test_split = argv[++i];        /* L,R: the side panels' widths, over pick.ini's */
@@ -2855,6 +2888,7 @@ static int gui(int argc, char **argv) {
         GAMEDIRS[0] = g0; GAMEDIRS[1] = g1; N_GAME = 2; snprintf(GAMETAG[0], 16, "data"); snprintf(GAMETAG[1], 16, "dist");
     }
     if (test_contrast) contrast_report(ctx);
+    if (test_fold) { int a = 0, b2 = 0; sscanf(test_fold, "%d,%d", &a, &b2); S.fold[0] = a == 1; S.fold[1] = b2 == 1; }
     if (!S.empty) choose(S.pos);
     if (test_from) { int f; for (f = 0; f < 3; f++) if (!strcmp(test_from, FROM_NAMES[f]) && (f != FROM_UP || S.has_up)) { S.from = f; load_desc_text(S.item); } }
     if (test_find) { snprintf(S.find, sizeof S.find, "%s", test_find); first_fit(); }
@@ -2907,7 +2941,7 @@ static int gui(int argc, char **argv) {
                 GAMEDIRS[0] = g0; GAMEDIRS[1] = g1; N_GAME = 2; snprintf(GAMETAG[0], 16, "data"); snprintf(GAMETAG[1], 16, "dist"); keep(); if (test_undo) undo_keep(); test_keep = 0; continue;
             }
             if (frames > 6 && S.empty) { save_bmp(shot, W, H); vlog(VLOG_INFO, "selftest", "wrote %s (the empty start)", shot); break; }
-            if (frames > 6) { save_bmp(shot, W, H); vlog(VLOG_INFO, "selftest", "wrote %s (%d x %d, panels %d | grid %d columns | %d)", shot, W, H, S.split[0], S.per, S.split[1]); break; }
+            if (frames > 6) { save_bmp(shot, W, H); vlog(VLOG_INFO, "selftest", "wrote %s (%d x %d, panels %d | grid %d columns | %d%s%s)", shot, W, H, S.split[0], S.per, S.split[1], S.fold[0] ? ", left folded" : "", S.fold[1] ? ", right folded" : ""); break; }
         }
     }
     if (S.busy) { InterlockedExchange(&S.stop, 1); for (i = 0; i < 100 && S.busy; i++) Sleep(100); }
