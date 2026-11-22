@@ -14,7 +14,7 @@ set W=-O2 -Wall -Wextra -Wno-missing-field-initializers -Wno-unused-function
 rem the third-party code once, without our warnings (it only changes with third_party\VERSIONS.txt)
 if not exist ..\obj\nk_impl.o clang %CLANG_FLAGS% -O2 -w -c -o ..\obj\nk_impl.o nk_impl.c || exit /b 1
 if /i not "%1"=="sd" (
-  clang %CLANG_FLAGS% %W% -mwindows -static -o ..\voxup.exe pick.c shrink.c upright.c voxup.c vlog.c ..\obj\nk_impl.o -lwinhttp -lgdi32 -luser32 -lmsimg32 -lkernel32 -lm || exit /b 1
+  clang %CLANG_FLAGS% %W% -mwindows -static -o ..\voxup.exe pick.c shrink.c upright.c voxup.c vlog.c embed.c ..\obj\nk_impl.o -lwinhttp -lgdi32 -luser32 -lmsimg32 -lkernel32 -lm || exit /b 1
   echo built voxup.exe
   exit /b 0
 )
@@ -27,7 +27,8 @@ clang %CLANG_FLAGS% %W% -c -o ..\obj\shrink.o shrink.c || exit /b 1
 clang %CLANG_FLAGS% %W% -c -o ..\obj\voxup.o voxup.c || exit /b 1
 clang %CLANG_FLAGS% %W% -c -o ..\obj\vlog.o vlog.c || exit /b 1
 clang %CLANG_FLAGS% %W% -c -o ..\obj\upright.o upright.c || exit /b 1
-clang++ %CLANG_FLAGS% -O2 -mwindows -static -o ..\voxup.exe ..\obj\pick-sd.o ..\obj\shrink.o ..\obj\voxup.o ..\obj\vlog.o ..\obj\upright.o ..\obj\nk_impl.o ^
+clang %CLANG_FLAGS% %W% -Wno-c23-extensions -c -o ..\obj\embed.o embed.c || exit /b 1
+clang++ %CLANG_FLAGS% -O2 -mwindows -static -o ..\voxup.exe ..\obj\pick-sd.o ..\obj\shrink.o ..\obj\voxup.o ..\obj\vlog.o ..\obj\upright.o ..\obj\embed.o ..\obj\nk_impl.o ^
   "%B%\libstable-diffusion.a" "%B%\ggml\src\ggml.a" "%B%\ggml\src\ggml-cpu.a" "%B%\ggml\src\ggml-vulkan\ggml-vulkan.a" "%B%\ggml\src\ggml-base.a" ^
   "%VULKAN_SDK%\Lib\vulkan-1.lib" -lpthread -lwinspool -lshell32 -lole32 -loleaut32 -luuid -lcomdlg32 -ladvapi32 ^
   -lwinhttp -lgdi32 -luser32 -lmsimg32 -lkernel32 -lm || exit /b 1

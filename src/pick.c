@@ -34,6 +34,7 @@
 #include "third_party/stb_image.h"
 #include "third_party/stb_image_write.h"
 #include "vlog.h"
+#include "embed.h"
 #include "shrink.h"
 #include "upright.h"
 /* the built-in engine (stable-diffusion.cpp, built in with -DVOXUP_SD): models drawn inside voxup, no ComfyUI */
@@ -544,10 +545,19 @@ static int file_there(const MFile *f) {
 /* what a model still needs, in bytes (a file two models share counts once: it is one file) */
 static long long model_missing(int m) { long long t = 0; int i; for (i = 0; i < S.m[m].nf; i++) if (!file_there(&S.m[m].f[i])) t += S.m[m].f[i].size; return t; }
 static void check_ready(void) { int i; for (i = 0; i < S.nm; i++) S.m[i].ready = model_missing(i) == 0 && S.m[i].nf > 0; }
+/* a file of the model list: the models folder's own (voxup.ini models =, else models\ beside the exe), else the copy
+   built into voxup.exe (embed.c); p gets where it came from. NULL when neither has it. */
+static char *model_file(const char *name, char *p, size_t np, int *built_in) {
+    char *t; size_t n; const char *e;
+    snprintf(p, np, "%s\\%s", MODELS, name);
+    if ((t = read_all(p, NULL))) { if (built_in) *built_in = 0; return t; }
+    if (!(e = embed_get(name, &n))) return NULL;
+    t = xmalloc(n + 1); memcpy(t, e, n + 1); snprintf(p, np, "%s (built in)", name); if (built_in) *built_in = 1; return t;
+}
 static void load_models(void) {
-    char p[MAX_PATH], *t, *l; Model *m = NULL;
-    snprintf(p, sizeof p, "%s\\models.txt", MODELS);
-    if (!(t = read_all(p, NULL))) { vlog(VLOG_ERR, "models", "no model list: %s missing", p); return; }
+    char p[MAX_PATH], *t, *l; Model *m = NULL; int nbuilt = 0, bi = 0;
+    if (!(t = model_file("models.txt", p, sizeof p, &bi))) { vlog(VLOG_ERR, "models", "no model list: %s\\models.txt missing and none built in", MODELS); return; }
+    nbuilt += bi;
     for (l = strtok(t, "\r\n"); l; l = strtok(NULL, "\r\n")) {
         char k[16] = "", *v; while (*l == ' ') l++;
         if (!*l || *l == '#') continue;
@@ -578,15 +588,15 @@ static void load_models(void) {
     free(t);
     { int i, j; for (i = j = 0; i < S.nm; i++) {      /* a model with neither a graph nor the built-in engine's lines cannot draw */
         int sd = SD_BUILT && S.m[i].nsd > 0;
-        snprintf(p, sizeof p, "%s\\%s.json", MODELS, S.m[i].id);
-        if ((S.m[i].graph = read_all(p, NULL)) && (!strstr(S.m[i].graph, "\"@IMAGE@\"") || !strstr(S.m[i].graph, "\"@PROMPT@\"") || !strstr(S.m[i].graph, "\"@SEED@\""))) {
+        { char nm[40]; snprintf(nm, sizeof nm, "%s.json", S.m[i].id); S.m[i].graph = model_file(nm, p, sizeof p, &bi); if (S.m[i].graph) nbuilt += bi; }
+        if (S.m[i].graph && (!strstr(S.m[i].graph, "\"@IMAGE@\"") || !strstr(S.m[i].graph, "\"@PROMPT@\"") || !strstr(S.m[i].graph, "\"@SEED@\""))) {
             vlog(VLOG_ERR, "models", "%s lacks \"@IMAGE@\", \"@PROMPT@\" or \"@SEED@\": not used", p); free(S.m[i].graph); S.m[i].graph = NULL; }
         if (!S.m[i].graph && !sd) { vlog(VLOG_ERR, "models", "model %s left out: no graph %s%s", S.m[i].id, p, SD_BUILT ? " and no sd lines" : " (and this voxup has no built-in engine)"); continue; }
         if (!S.m[i].strength) S.m[i].strength = 60;
         S.m[j++] = S.m[i];
     } S.nm = j; }
     check_ready();
-    vlog(VLOG_INFO, "models", "%d models from %s", S.nm, MODELS);
+    vlog(VLOG_INFO, "models", "%d models from %s (%d of the files built in)", S.nm, MODELS, nbuilt);
 }
 
 /* a picture for the window: RGBA w x h, each pixel scale x scale, on the sheets' checker (or as it is when opaque) */
