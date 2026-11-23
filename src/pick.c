@@ -3231,7 +3231,12 @@ static int gui(int argc, char **argv) {
     vlog(VLOG_INFO, "dpi", "the window's scale: %.2f (%d DPI)", S.ui, (int)(S.ui * 96 + 0.5f));
     dc = GetDC(S.wnd);
     font = nk_gdifont_create("Segoe UI", 16);
-    ctx = nk_gdi_init(font, dc, (unsigned)(W * S.ui), (unsigned)(H * S.ui));
+    {   /* the surface as big as the window really is: a restored (maximised) placement came before the surface, its size message was lost */
+        RECT cr; unsigned cw = (unsigned)(W * S.ui), ch = (unsigned)(H * S.ui);
+        if (!shot && GetClientRect(S.wnd, &cr) && cr.right > 0 && cr.bottom > 0) { cw = (unsigned)cr.right; ch = (unsigned)cr.bottom; }
+        ctx = nk_gdi_init(font, dc, cw, ch);
+        vlog(VLOG_INFO, "pick", "the window's surface: %u x %u", cw, ch);
+    }
     if (shot) {   /* a self-test never keeps into the real game folders (a test click or key can keep too) */
         static char g0[MAX_PATH], g1[MAX_PATH];
         snprintf(g0, sizeof g0, "%s\\selftest-game\\data", WORK); snprintf(g1, sizeof g1, "%s\\selftest-game\\dist", WORK);
