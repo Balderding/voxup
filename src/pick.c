@@ -575,7 +575,7 @@ typedef struct { int model; unsigned seed; int src; volatile int st; unsigned ch
 typedef struct { int n; Shot s[MAXSHOT]; } Round;
 #define MAXR 200
 /* a model of models.txt: its graph, the files it needs, how many pictures a round, its prompt */
-#define MAXM 24
+#define MAXM 48
 #define MAXF 6
 typedef struct { char dir[32], name[112], url[512], sha[65]; long long size; } MFile;     /* sha: its SHA-256 (hex), checked after Get */
 /* the built-in engine's lines of a model ("sd ctx KEY VALUE", "sd img KEY VALUE"): where 'c' context, 'i' each picture */
