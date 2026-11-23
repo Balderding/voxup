@@ -2060,7 +2060,7 @@ static int hf_host(const wchar_t *h) {
     return !_wcsicmp(h, L"huggingface.co") || (n > k && !_wcsicmp(h + n - k, L".huggingface.co"));
 }
 static int get_file(const MFile *f) {
-    static HINTERNET net; wchar_t wu[1024], host[256], path[1024], hdr[100]; URL_COMPONENTS uc; HINTERNET con = NULL, rq = NULL;
+    static HINTERNET net; static wchar_t wu[8192], path[8192]; wchar_t host[256], hdr[100];   /* signed CDN links run past 1024 (2026-11-22) */ URL_COMPONENTS uc; HINTERNET con = NULL, rq = NULL;
     char dst[MAX_PATH], part[MAX_PATH], dir[MAX_PATH]; long long have = 0; DWORD code = 0, sz = sizeof code, got; FILE *o = NULL; int r = 0;
     file_path(f, dst, sizeof dst); snprintf(part, sizeof part, "%s.part", dst);
     snprintf(dir, sizeof dir, "%s\\%s", P_SHARED, f->dir); mkdirs(dir);
@@ -2071,15 +2071,15 @@ static int get_file(const MFile *f) {
     if (!net) net = WinHttpOpen(L"voxup/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!net) net = WinHttpOpen(L"voxup/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!net) { dl_say("Could not use the internet (WinHTTP): %s", vlog_errno()); return 0; }
-    MultiByteToWideChar(CP_UTF8, 0, f->url, -1, wu, 1024);
+    MultiByteToWideChar(CP_UTF8, 0, f->url, -1, wu, 8192);
     {   int hop;    /* redirects followed here, not by WinHTTP: the token is decided again for every host (P2-3) */
         for (hop = 0; ; hop++) {
             DWORD pol = WINHTTP_OPTION_REDIRECT_POLICY_NEVER; int tok;
             memset(&uc, 0, sizeof uc); uc.dwStructSize = sizeof uc;
-            uc.lpszHostName = host; uc.dwHostNameLength = 256; uc.lpszUrlPath = path; uc.dwUrlPathLength = 1024;
-            { wchar_t extra[512]; uc.lpszExtraInfo = extra; uc.dwExtraInfoLength = 512;
+            uc.lpszHostName = host; uc.dwHostNameLength = 256; uc.lpszUrlPath = path; uc.dwUrlPathLength = 8192;
+            { static wchar_t extra[8192]; uc.lpszExtraInfo = extra; uc.dwExtraInfoLength = 8192;
               if (!WinHttpCrackUrl(wu, 0, 0, &uc)) { dl_say("Bad link for %s: %ls", f->name, wu); return 0; }
-              wcsncat(path, extra, 1023 - wcslen(path)); }
+              wcsncat(path, extra, 8191 - wcslen(path)); }
             con = WinHttpConnect(net, host, uc.nPort, 0);
             if (con) rq = WinHttpOpenRequest(con, L"GET", path, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, uc.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0);
             if (!rq) { dl_say("Could not reach %ls for %s: %s", host, f->name, vlog_errno()); goto done; }
@@ -2098,12 +2098,12 @@ static int get_file(const MFile *f) {
             sz = sizeof code;
             WinHttpQueryHeaders(rq, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &code, &sz, WINHTTP_NO_HEADER_INDEX);
             if (code != 301 && code != 302 && code != 303 && code != 307 && code != 308) break;
-            {   wchar_t loc[1024]; DWORD ls = sizeof loc;
+            {   static wchar_t loc[8192], b[8192]; DWORD ls = sizeof loc;
                 if (hop >= 8 || !WinHttpQueryHeaders(rq, WINHTTP_QUERY_LOCATION, WINHTTP_HEADER_NAME_BY_INDEX, loc, &ls, WINHTTP_NO_HEADER_INDEX)) {
                     dl_say("%s: too many redirects, or one with no address (HTTP %lu)", f->name, code); goto done; }
-                if (loc[0] == L'/') { wchar_t b[1024]; swprintf(b, 1024, L"%ls://%ls:%u%ls", uc.nScheme == INTERNET_SCHEME_HTTPS ? L"https" : L"http", host, (unsigned)uc.nPort, loc); wcsncpy(wu, b, 1023); }
-                else wcsncpy(wu, loc, 1023);
-                wu[1023] = 0;
+                if (loc[0] == L'/') { swprintf(b, 8192, L"%ls://%ls:%u%ls", uc.nScheme == INTERNET_SCHEME_HTTPS ? L"https" : L"http", host, (unsigned)uc.nPort, loc); wcsncpy(wu, b, 8191); }
+                else wcsncpy(wu, loc, 8191);
+                wu[8191] = 0;
                 vlog(VLOG_INFO, "get", "%s: redirected (HTTP %lu) to %ls", f->name, code, wu);
             }
             WinHttpCloseHandle(rq); rq = NULL; WinHttpCloseHandle(con); con = NULL;
