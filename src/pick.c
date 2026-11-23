@@ -588,6 +588,7 @@ typedef struct {
     /* the built-in engine: its lines; how the item's picture goes in (1 a reference picture, 2 the start picture, so
        strength says how much may change); a LoRA (models.txt "sd lora DIR NAME") at lora_w % */
     SdLine sd[MAXSD]; int nsd, sdimage, strength, has_lora, lora_w; char lora[MAX_PATH];
+    char xlora[3][MAX_PATH]; int xlora_w[3], nxlora;     /* more "sd lora" lines: added at their own strength (2026-11-22) */
 } Model;
 static struct {
     int list[512], nlist, pos;                 /* the items with a 16 x 16 original, minus voxup.ini's skip list */
@@ -700,7 +701,9 @@ static void load_models(void) {
             sscanf(v, "%15s %63s %n", w, key, &nn);
             if (!strcmp(w, "image")) m->sdimage = !strcmp(key, "init") ? 2 : 1;
             else if (!strcmp(w, "strength")) m->strength = atoi(key);
-            else if (!strcmp(w, "lora") && sscanf(v, "%*s %63s %111s %d", key, a, &m->lora_w) == 3) { snprintf(m->lora, sizeof m->lora, "%s\\%s", key, a); m->has_lora = 1; }
+            else if (!strcmp(w, "lora") && !m->has_lora && sscanf(v, "%*s %63s %111s %d", key, a, &m->lora_w) == 3) { snprintf(m->lora, sizeof m->lora, "%s\\%s", key, a); m->has_lora = 1; }
+            else if (!strcmp(w, "lora") && m->has_lora && m->nxlora < 3 && sscanf(v, "%*s %63s %111s %d", key, a, &m->xlora_w[m->nxlora]) == 3) {   /* the second, third...: fixed strength */
+                snprintf(m->xlora[m->nxlora], sizeof m->xlora[0], "%s\\%s", key, a); m->nxlora++; }
             else if ((!strcmp(w, "ctx") || !strcmp(w, "img")) && key[0] && nn && m->nsd < MAXSD) {
                 SdLine *s = &m->sd[m->nsd++]; s->where = w[0]; snprintf(s->key, sizeof s->key, "%s", key); snprintf(s->val, sizeof s->val, "%s", v + nn);
             } else vlog(VLOG_WARN, "models", "%s: bad sd line for %s: %s", p, m->id, v);
@@ -1465,10 +1468,12 @@ static void draw_one_sd(int item, int round, Shot *s, const char *desc, const ch
         sd_opt_set_int(o, "width", 1024) || sd_opt_set_int(o, "height", 1024)) goto fail;
     if (M->sdimage == 2) { if (sd_opt_set_tensor(o, "init_image", in) || sd_opt_set_float(o, "strength", M->strength / 100.0)) goto fail; }
     else { const sd_tensor_t *refs[1]; refs[0] = in; if (sd_opt_set_tensors(o, "ref_images", refs, 1)) goto fail; }
-    if (M->has_lora && M->lora_w > 0) {
-        sd_lora_t l; char lp[MAX_PATH]; memset(&l, 0, sizeof l); snprintf(lp, sizeof lp, "%s\\%s", P_SHARED, M->lora);
-        l.path = lp; l.multiplier = M->lora_w / 100.0f;
-        if (sd_opt_set_loras(o, "loras", &l, 1)) goto fail;
+    if (M->has_lora) {      /* the first LoRA at the window's strength, the others at their own (models.txt) */
+        sd_lora_t l[4]; char lp[4][MAX_PATH]; int nl = 0, k;
+        memset(l, 0, sizeof l);
+        if (M->lora_w > 0) { snprintf(lp[nl], MAX_PATH, "%s\\%s", P_SHARED, M->lora); l[nl].path = lp[nl]; l[nl].multiplier = M->lora_w / 100.0f; nl++; }
+        for (k = 0; k < M->nxlora; k++) if (M->xlora_w[k] > 0) { snprintf(lp[nl], MAX_PATH, "%s\\%s", P_SHARED, M->xlora[k]); l[nl].path = lp[nl]; l[nl].multiplier = M->xlora_w[k] / 100.0f; nl++; }
+        if (nl && sd_opt_set_loras(o, "loras", l, nl)) goto fail;
     }
     for (i = 0; i < M->nsd; i++) if (M->sd[i].where == 'i') {
         sd_value(M->sd[i].val, v, sizeof v);
